@@ -14,7 +14,7 @@ const TOOLS = [
 ];
 
 export function createInlineEditor({ getSignature, getVault, tagColors, onSaveBody, onSaveTags, onClose }) {
-  let current = null; // { kind, wrapper, hidden: [elements], save(), isDirty(), saving }
+  let current = null; // { kind, wrapper, hidden: [elements], save(), isDirty(), saving: promise while saving }
 
   // ---- Body ---------------------------------------------------------------------------
 
@@ -181,7 +181,7 @@ export function createInlineEditor({ getSignature, getVault, tagColors, onSaveBo
   function show(wrapper, hide, state, anchor = hide[0]) {
     anchor.before(wrapper);
     for (const element of hide) element.hidden = true;
-    current = { ...state, wrapper, hidden: hide, saving: false };
+    current = { ...state, wrapper, hidden: hide, saving: null };
     wrapper.scrollIntoView({ block: 'nearest' });
   }
 
@@ -220,17 +220,30 @@ export function createInlineEditor({ getSignature, getVault, tagColors, onSaveBo
     });
   }
 
-  async function persist(write) {
-    if (!current || current.saving) return;
+  // Saves the edit. -> Promise of true when it's saved (and the editor closed), false when it
+  // couldn't be (the editor stays open, showing why). A save already under way is shared.
+  function persist(write) {
+    if (!current) return Promise.resolve(true);
     const edit = current;
-    edit.saving = true;
+    if (edit.saving) return edit.saving;
     edit.wrapper.classList.add('busy');
-    const result = await write();
-    edit.saving = false;
-    edit.wrapper.classList.remove('busy');
-    if (current !== edit) return;
-    if (result === true) close_();
-    else showError(`${result} Press Esc to cancel and see the latest version.`);
+    edit.saving = (async () => {
+      let result;
+      try {
+        result = await write();
+      } catch (err) {
+        result = err.message;
+      }
+      edit.saving = null;
+      edit.wrapper.classList.remove('busy');
+      if (result === true) {
+        if (current === edit) close_();
+        return true;
+      }
+      if (current === edit) showError(`${result} Press Esc to cancel and see the latest version.`);
+      return false;
+    })();
+    return edit.saving;
   }
 
   // Esc: asks first if a body edit would be thrown away.
@@ -241,11 +254,12 @@ export function createInlineEditor({ getSignature, getVault, tagColors, onSaveBo
   }
 
   function close_() {
-    if (!current) return;
+    if (!current) return true;
     current.wrapper.remove();
     for (const element of current.hidden) element.hidden = false;
     current = null;
     onClose();
+    return true;
   }
 
   function showError(message) {
@@ -262,7 +276,7 @@ export function createInlineEditor({ getSignature, getVault, tagColors, onSaveBo
     openBody,
     openTags,
     cancel,
-    save: () => current?.save(),
+    save: async () => (current ? current.save() : true), // -> whether it's saved (see persist)
     isOpen: () => current !== null,
     isDirty: () => Boolean(current?.isDirty()),
   };

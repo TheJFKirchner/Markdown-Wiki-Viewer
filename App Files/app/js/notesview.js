@@ -1,7 +1,9 @@
 // The Notes view: a quick note, ready to type in. The title is a text box; the text before the
 // first section and each "## " section are shown formatted while you write (livetext.js:
 // click a paragraph, list or table to edit it). Everything saves as you type (the whole file is
-// rewritten, but only if it still says what it said when it was loaded).
+// rewritten, but only if it still says what it said when it was loaded; parts not typed in keep
+// their lines exactly, blank lines included). A save that fails keeps the text, even after
+// moving to another note: that note comes back with Keep mine / Load latest.
 // The formatting toolbar sits at the top while the note can be typed in, and acts on the box
 // last typed in. Without a note open, it shows a start page: the templates, where new notes are
 // saved, and the open notes.
@@ -17,7 +19,7 @@ const AUTOSIZE = typeof CSS !== 'undefined' && CSS.supports?.('field-sizing', 'c
 
 export function createNotesView(container, {
   getVault, getSignature, getTemplates, getLocation, setLocation, render: renderMarkdown, renderEditable,
-  onOpenLink, onOpenExternal, onWrite, onNew, onOpen, onOpenPage, onChange,
+  onOpenLink, onOpenExternal, onWrite, onNew, onOpen, onOpenPage, onChange, onSaveFailed,
 }) {
   // The note being shown: { id, note, base: file lines as last read or written, front,
   // saving, queued: lines waiting to be written, error }
@@ -60,7 +62,11 @@ export function createNotesView(container, {
   async function write(s) {
     const lines = s.queued;
     s.queued = null;
-    if (!lines || s.error) return;
+    if (!lines) return;
+    if (s.error) {
+      s.unsaved = lines; // kept until the user picks Keep mine or Load latest
+      return;
+    }
     if (same(lines, s.base)) {
       if (s === session) setStatus('Saved');
       return;
@@ -69,14 +75,19 @@ export function createNotesView(container, {
     let done;
     s.saving = new Promise((resolve) => (done = resolve));
     const result = await onWrite(s.note, s.base, lines);
-    if (result === true) s.base = lines;
-    else s.error = result;
+    if (result === true) {
+      s.base = lines;
+      s.unsaved = null;
+    } else {
+      s.error = result;
+      s.unsaved = lines;
+    }
     s.saving = null;
     if (s === session) {
       if (s.error) showError(s.error);
       else setStatus('Saved');
     }
-    if (s.queued && !s.error) await write(s);
+    if (s.queued) await write(s);
     done();
   }
 
@@ -85,9 +96,11 @@ export function createNotesView(container, {
   function collect() {
     return {
       front: session.front,
+      layout: session.layout, // so parts that weren't touched keep their lines exactly
       title: container.querySelector('.jot-title')?.value || '',
       intro: textOf(container.querySelector('.jot-intro')),
       sections: [...container.querySelectorAll('.jot-section')].map((section) => ({
+        index: section.dataset.index === undefined ? undefined : Number(section.dataset.index),
         heading: section.querySelector('.jot-heading').value,
         text: textOf(section.querySelector('.live-text')),
       })),
@@ -102,22 +115,36 @@ export function createNotesView(container, {
 
   function open(id) {
     if (session && session.id === id) return; // already showing it (and maybe mid-edit)
-    if (session) flush();
+    if (session) {
+      // Save the note being left. If that fails, it comes back with the text that wasn't
+      // saved and the Keep mine / Load latest choice, rather than the text being lost.
+      const left = session;
+      flush(left).then(() => {
+        if (!left.error || session === left) return;
+        if (session) flush();
+        session = left;
+        render();
+        onChange?.();
+        onSaveFailed?.(left.note);
+      });
+    }
     const note = id && getVault()?.notes.get(id);
     if (!note) {
       session = null;
       renderStart();
       return;
     }
-    session = { id, note, base: note.content.split(/\r?\n/), front: [], saving: null, queued: null, error: null };
+    session = { id, note, base: note.content.split(/\r?\n/), front: [], saving: null, queued: null, error: null, unsaved: null };
     render();
   }
 
   function render({ keepFocus = false } = {}) {
     const focus = keepFocus ? focusState() : null;
     const { note } = session;
-    const parts = parseNote(note.content);
+    // A save that failed after the user left this note: show the text that wasn't saved.
+    const parts = parseNote(session.unsaved ? session.unsaved.join('\n') : note.content);
     session.front = parts.front;
+    session.layout = parts.layout;
     const info = noteInfo(note);
     const locked = info.wrapped;
     const vault = getVault();
@@ -164,7 +191,11 @@ export function createNotesView(container, {
       intro.classList.add('jot-intro');
       page.append(intro);
     }
-    for (const section of parts.sections) page.append(sectionBox(section, note.folder, locked));
+    parts.sections.forEach((section, n) => {
+      const box = sectionBox(section, note.folder, locked);
+      box.dataset.index = n; // its place in session.layout
+      page.append(box);
+    });
 
     if (!locked) {
       const add = el('label', 'jot-new');
@@ -403,6 +434,7 @@ export function createNotesView(container, {
       session.note = latest;
       session.base = latest.content.split(/\r?\n/);
       session.error = null;
+      session.unsaved = null;
       render();
     });
     status.append(keep, ' · ', reload);
@@ -442,6 +474,8 @@ export function createNotesView(container, {
     shownId: () => session?.id || null,
     title: () => (session ? session.note.name : 'Notes'),
     flush: () => flush(),
+    // After flush(): the shown note's name if its text isn't saved (a failed save), else null.
+    unsavedNote: () => (session?.error ? session.note.name : null),
     // After a rescan: pick up the note's new text, unless the user is in the middle of an edit.
     setVault(vault) {
       if (!session) {

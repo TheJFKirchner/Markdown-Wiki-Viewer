@@ -154,7 +154,8 @@ function isoWeek(date) {
 
 // ---- A note as parts the Notes view edits --------------------------------------------
 
-// -> { front: [frontmatter lines, with the --- lines] or [], title, intro, sections: [{ heading, text }] }
+// -> { front: [frontmatter lines, with the --- lines] or [], title, intro, sections: [{ heading, text }],
+//      layout: the lines exactly as they were, so noteLines can give back untouched parts unchanged }
 export function parseNote(content) {
   const lines = content.split(/\r?\n/);
   let i = 0;
@@ -166,12 +167,14 @@ export function parseNote(content) {
       i = close + 1;
     }
   }
-  while (i < lines.length && !lines[i].trim()) i++;
+  const pre = [];
+  while (i < lines.length && !lines[i].trim()) pre.push(lines[i++]);
   let title = '';
+  let titleLine = null;
   const h1 = /^#[ \t]+(.*?)[ \t]*$/.exec(lines[i] || '');
   if (h1) {
     title = h1[1];
-    i++;
+    titleLine = lines[i++];
   }
 
   const intro = [];
@@ -181,28 +184,57 @@ export function parseNote(content) {
     const line = lines[i];
     if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
     const heading = !inFence && /^##[ \t]+(.*?)[ \t]*$/.exec(line);
-    if (heading) sections.push({ heading: heading[1], lines: [] });
+    if (heading) sections.push({ heading: heading[1], line, lines: [] });
     else (sections.length ? sections[sections.length - 1].lines : intro).push(line);
   }
-  return {
+  const parts = {
     front,
     title,
     intro: trimBlank(intro).join('\n'),
     sections: sections.map((s) => ({ heading: s.heading, text: trimBlank(s.lines).join('\n') })),
   };
+  parts.layout = {
+    pre, title, titleLine,
+    intro: { text: parts.intro, raw: intro },
+    sections: sections.map((s, n) => ({ heading: s.heading, line: s.line, text: parts.sections[n].text, raw: s.lines })),
+  };
+  return parts;
 }
 
-// The file's lines for those parts (ending with an empty line = a final newline).
-export function noteLines({ front, title, intro, sections }) {
+// The file's lines for those parts (ending with an empty line = a final newline). With the
+// layout parseNote gave (and each section's `index` in it), a part that wasn't changed keeps
+// its lines exactly, blank lines included; a changed part keeps the blank lines around it.
+export function noteLines({ front, title, intro, sections, layout }) {
   const out = [...front];
-  if (title.trim()) out.push(`# ${title.trim()}`, '');
-  const introLines = trimBlank(intro.split('\n'));
-  if (introLines.length) out.push(...introLines, '');
+  if (layout) out.push(...layout.pre);
+  const hadTitle = layout?.titleLine != null;
+  if (hadTitle && title.trim() === layout.title.trim()) out.push(layout.titleLine);
+  else if (title.trim()) out.push(`# ${title.trim()}`, ...(hadTitle ? [] : [''])); // the blank line after an old title is the intro's
+  out.push(...part(intro, layout?.intro, false));
   for (const section of sections) {
-    out.push(`## ${section.heading.trim() || 'Untitled'}`, ...trimBlank(section.text.split('\n')), '');
+    const was = layout?.sections[section.index];
+    const heading = section.heading.trim();
+    out.push(was && heading === was.heading.trim() ? was.line : `## ${heading || 'Untitled'}`);
+    out.push(...part(section.text, was, true));
   }
-  if (out[out.length - 1] !== '') out.push('');
+  if (!layout && out[out.length - 1] !== '') out.push('');
   return out;
+}
+
+// A part's lines: as they were if its text is unchanged, else its new text between the blank
+// lines that were around it. A part that's new (or was only blank lines) is followed by one
+// blank line; without one, so is an empty intro (alwaysBlank: false) — it's left out.
+function part(text, was, alwaysBlank) {
+  const lines = trimBlank(text.split('\n'));
+  if (was && lines.join('\n') === was.text) return [...was.raw];
+  const lead = was ? was.raw.findIndex((l) => l.trim()) : -1;
+  if (lead < 0) {
+    const blanks = was?.raw.length ? was.raw : [''];
+    return lines.length || alwaysBlank ? [...lines, ...blanks] : [...(was?.raw || [])];
+  }
+  let trail = 0;
+  while (!was.raw[was.raw.length - 1 - trail].trim()) trail++;
+  return [...was.raw.slice(0, lead), ...lines, ...was.raw.slice(was.raw.length - trail)];
 }
 
 // Sets (or, with null, removes) simple "key: value" lines in frontmatter lines.

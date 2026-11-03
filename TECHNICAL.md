@@ -216,9 +216,17 @@ host → page   { event, data }            (pushed, no id)
 | `saveSettings` | Writes `settings.json` |
 | `openExternal` | Opens a URL in the default browser |
 | `setTitle` | Python host only: sets the window title to the page's (the exe follows the title itself) |
+| `closeWindow` | The page's answer to `closeRequested`: `answer` is `asking` (it's asking the user), `no` (stay open) or `yes` (close now) |
 | `ingestInfo`, `saveIngestState`, `saveIngestNotes`, `startIngest`, `reviseIngestCards`, `cancelIngest`, `runIngestSetup`, `listIngestRuns`, `openIngestRun`, `listIngestModels` | Ingest (§8) |
 
-**Events:** `vaultChanged` (a watched folder changed), `ingest` (one progress line from the agent), `ingestExit` (the agent process ended).
+**Events:** `vaultChanged` (a watched folder changed), `ingest` (one progress line from the agent), `ingestExit` (the agent process ended), `closeRequested` (the window's close button was clicked; the window stays open until the page answers `closeWindow`).
+
+**Closing.** The close button doesn't close at once. The host cancels it and sends `closeRequested`. The page then:
+- saves the Notes view's last typing;
+- saves an open in-place edit;
+- asks before throwing away anything it couldn't save, or unsaved changes in the full editor.
+
+If the page never answers (it's broken or still loading), a click after 4 seconds closes anyway. F5 asks the same way (`setBeforeReload` in `bridge.js`). Anything else that unloads the page gets the browser's own "Leave?" question (`beforeunload`).
 
 ### 4.3 How a change reaches a file
 
@@ -227,8 +235,12 @@ The app never holds a lock on notes and never overwrites blindly:
 1. The page reads a note's text from the latest scan.
 2. To save, it sends `editLines` with the line number, the lines it expects to find there, and the replacement lines.
 3. The host re-reads the file. If those lines no longer match, because the file changed on disk (another editor, a sync tool), it **refuses** with "The note changed on disk".
-4. The page rescans and tells the user. In the full editor, the user's text is kept so nothing typed is lost.
-5. After every successful write, the folder is rescanned and the whole model is rebuilt.
+4. The page rescans and tells the user, and the user's text is kept so nothing typed is lost:
+   - In the full editor, it stays in the editor.
+   - In an in-place edit, the page doesn't change until it's saved or dropped (Esc).
+   - In the Notes view, the note comes back with **Keep mine / Load latest**, even if the user had already moved to another note.
+5. The host writes the whole file to a hidden temp file next to it, then swaps it in, so a failed write leaves the old note whole. It refuses to edit a note that isn't UTF-8 rather than corrupt it.
+6. After every successful write, the folder is rescanned and the whole model is rebuilt.
 
 ### 4.4 The page (`App Files\app\`)
 

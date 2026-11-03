@@ -120,7 +120,25 @@ namespace WikiApp
             Size = new Size(area.Width * 8 / 10, area.Height * 8 / 10);
             Location = new Point(area.X + (area.Width - Width) / 2, area.Y + (area.Height - Height) / 2);
             RestoreWindowPlacement();
-            FormClosing += (s, e) => SaveWindowPlacement();
+            FormClosing += (s, e) =>
+            {
+                // The close button: first the page saves what's typed and asks about anything
+                // unsaved ("closeRequested"), then it answers closeWindow. If the page doesn't
+                // answer (broken or still loading), a click after a few seconds closes anyway.
+                if (pageReady && !closeAllowed && e.CloseReason == CloseReason.UserClosing)
+                {
+                    if (closeAsking) { e.Cancel = true; return; }
+                    if (closeAsked == DateTime.MinValue)
+                    {
+                        closeAsked = DateTime.UtcNow;
+                        PostEvent("closeRequested", new Dictionary<string, object>());
+                        e.Cancel = true;
+                        return;
+                    }
+                    if ((DateTime.UtcNow - closeAsked).TotalSeconds < CloseWaitSeconds) { e.Cancel = true; return; }
+                }
+                SaveWindowPlacement();
+            };
 
             web.Dock = DockStyle.Fill;
             web.DefaultBackgroundColor = BackColor;
@@ -362,10 +380,34 @@ namespace WikiApp
             if (web.CoreWebView2 != null) web.CoreWebView2.PostWebMessageAsJson(json.Serialize(reply));
         }
 
+        // Closing: see FormClosing.
+        const double CloseWaitSeconds = 4;
+        bool pageReady;                          // the page has sent a message, so it can be asked
+        bool closeAllowed;                       // the page said yes (closeWindow)
+        bool closeAsking;                        // the page is asking the user about unsaved text
+        DateTime closeAsked = DateTime.MinValue; // when the page was asked
+
         async Task<object> Dispatch(string cmd, Dictionary<string, object> args)
         {
+            pageReady = true;
             switch (cmd)
             {
+                // The page's answers to "closeRequested".
+                case "closeWindow":
+                    string answer = StringArg(args, "answer");
+                    if (answer == "asking") closeAsking = true;
+                    else if (answer == "no")
+                    {
+                        closeAsking = false;
+                        closeAsked = DateTime.MinValue;
+                    }
+                    else
+                    {
+                        closeAllowed = true;
+                        BeginInvoke((Action)Close);
+                    }
+                    return null;
+
                 case "getStartupFolders":
                     return startupFolders;
 

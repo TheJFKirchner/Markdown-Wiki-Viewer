@@ -38,13 +38,19 @@ if (python) {
   const sendTitle = () => call('setTitle', { title: document.title }).catch(() => {});
   new MutationObserver(sendTitle).observe(title, { childList: true, characterData: true, subtree: true });
   sendTitle();
-  // F5 (or Cmd+R on a Mac) reloads the app after an edit.
-  document.addEventListener('keydown', (e) => {
+  // F5 (or Cmd+R on a Mac) reloads the app after an edit, once the page agrees (setBeforeReload).
+  document.addEventListener('keydown', async (e) => {
     if (e.key === 'F5' || (e.metaKey && !e.shiftKey && e.key === 'r')) {
       e.preventDefault();
-      location.reload();
+      if (!beforeReload || (await beforeReload())) location.reload();
     }
   });
+}
+
+let beforeReload = null;
+// fn() -> Promise of whether F5 may reload the page (it saves, or asks about unsaved text).
+export function setBeforeReload(fn) {
+  beforeReload = fn;
 }
 
 export function call(cmd, args = {}) {

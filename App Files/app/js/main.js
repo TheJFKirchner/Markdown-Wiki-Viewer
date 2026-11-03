@@ -1,7 +1,7 @@
 // Wires the pieces together: workspace folders -> scans -> one combined model ->
 // file tree, graph and notes.
 
-import { call, on, isHosted } from './bridge.js';
+import { call, on, isHosted, setBeforeReload } from './bridge.js';
 import { buildVault, graphData, noteLabel, tagMatches, tagsEdit, RULES_FILE } from './vault.js';
 import { createWorkspace } from './workspace.js';
 import { createExplorer } from './explorer.js';
@@ -213,6 +213,7 @@ const notesView = createNotesView($('notes-view'), {
     notesPanel.setActive(notesView.shownId());
     updateTitle();
   },
+  onSaveFailed: (note) => toast(`Your last edits to ${note.name} couldn't be saved. They're kept in the Notes view: open it to keep them or load the latest version.`),
 });
 
 const ingestView = createIngestView($('ingest-view'), {
@@ -378,12 +379,30 @@ function stopEditing() {
   updateTitle();
 }
 
-// Closing an in-place edit before showing something else. Clicking elsewhere means "save",
-// so changes are saved (in the background) rather than dropped.
+// Closing an in-place edit before showing something else. Clicking elsewhere means "save", so
+// changes are saved rather than dropped. -> true at once when there's nothing to save, else a
+// Promise of whether it saved: if not, the page stays, with the edit and the reason showing.
 function leaveInlineEditor() {
   if (!inlineEditor.isOpen()) return true;
-  if (inlineEditor.isDirty()) inlineEditor.save();
-  else inlineEditor.cancel({ force: true });
+  if (!inlineEditor.isDirty()) {
+    inlineEditor.cancel({ force: true });
+    return true;
+  }
+  return inlineEditor.save().then((saved) => {
+    if (!saved) toast("Your edit to this page couldn't be saved, so the page stays open with your text. Copy what you need, then press Esc to see the latest version.");
+    return saved;
+  });
+}
+
+// Before the window closes or reloads: saves what can be saved and asks about what can't.
+// -> whether to go ahead.
+async function readyToLeave(action) {
+  await notesView.flush();
+  const failedNote = notesView.unsavedNote();
+  if (failedNote && !confirm(`Your last edits to ${failedNote} couldn't be saved. ${action} anyway and lose them?`)) return false;
+  if (inlineEditor.isOpen() && inlineEditor.isDirty() && !(await inlineEditor.save())
+      && !confirm(`Your edit to this page couldn't be saved. ${action} anyway and lose it?`)) return false;
+  if (state.editingId && editor.isDirty() && !confirm(`You have unsaved changes to ${pageTitle(state.editingId)}. ${action} anyway and lose them?`)) return false;
   return true;
 }
 
@@ -469,6 +488,26 @@ on('vaultChanged', async ({ root }) => {
   const folder = workspace.list().find((f) => samePath(f.root, root));
   if (folder && (await scanFolder(folder))) rebuild();
 });
+
+// ---- Closing and reloading ------------------------------------------------------------
+// The window's close button: the host asks the page first, and closes once it says so.
+// F5 asks too. Anything else that unloads the page gets the browser's own "Leave?" question.
+
+on('closeRequested', async () => {
+  const answer = (value) => call('closeWindow', { answer: value }).catch(() => {});
+  await answer('asking');
+  answer((await readyToLeave('Close WikiApp')) ? 'yes' : 'no');
+});
+let reloading = false;
+setBeforeReload(async () => (reloading = await readyToLeave('Reload')));
+window.addEventListener('beforeunload', (e) => {
+  if (reloading) return;
+  if ((state.editingId && editor.isDirty()) || inlineEditor.isDirty() || notesView.unsavedNote()) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+window.addEventListener('pagehide', () => notesView.flush()); // the last moment of typing, if it can
 
 // ---- Loading folders ----------------------------------------------------------------
 
@@ -680,8 +719,12 @@ function openFile(id, heading, { page = false } = {}) {
     return;
   }
   // An in-place edit has normally saved itself already (clicking elsewhere saves). One still
-  // open with changes (e.g. it couldn't be saved) is only dropped if the user agrees.
-  if (!leaveInlineEditor()) return;
+  // open with changes is saved first, and the page only changes once it has been.
+  const left = leaveInlineEditor();
+  if (left !== true) {
+    left.then((saved) => saved && openFile(id, heading, { page }));
+    return;
+  }
   state.openId = id;
   store('lastPage', id);
   explorer.setActive(id);

@@ -19,6 +19,7 @@ import secrets
 import shutil
 import sys
 import threading
+import time
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -39,6 +40,7 @@ SETTINGS_FILE = DATA_DIR / "settings.json"
 PLACEMENT_FILE = DATA_DIR / "window.txt"
 INSTANCE_FILE = DATA_DIR / "instance.json"
 BACKGROUND = "#1e1e1e"
+CLOSE_WAIT = 4.0  # seconds a page that doesn't answer "closeRequested" gets; a click after that closes
 MIME = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".html": "text/html",
         ".json": "application/json", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".woff2": "font/woff2"}
 
@@ -181,6 +183,10 @@ class Host:
         self.bounds = None  # the window's last normal (not maximized) x, y, width, height
         self.maximized = False
         self.minimized = False
+        self.page_ready = False      # the page has loaded and can be asked before closing
+        self.close_allowed = False   # the page said yes (closeWindow)
+        self.close_asked = 0.0       # when the page was asked (0: not asked)
+        self.close_asking = False    # the page is asking the user about unsaved text
 
     def dispatch(self, cmd, args):
         if cmd == "getStartupFolders":
@@ -215,7 +221,19 @@ class Host:
             open_external(args.get("url"))
             return None
         if cmd == "setTitle":  # the page's document title, for the window and the taskbar/Dock
+            self.page_ready = True  # the page sends it as soon as it loads
             self.window.set_title(str(args.get("title") or "WikiApp"))
+            return None
+        if cmd == "closeWindow":  # the page's answers to "closeRequested"
+            answer = args.get("answer")
+            if answer == "asking":    # it's alive and asking the user: wait as long as that takes
+                self.close_asking = True
+            elif answer == "no":      # the user kept the window open: the next click asks again
+                self.close_asking = False
+                self.close_asked = 0.0
+            else:                     # nothing left unsaved
+                self.close_allowed = True
+                self.window.destroy()
             return None
         return self.dispatch_ingest(cmd, args)
 
@@ -310,6 +328,20 @@ class Host:
         style_window(self.window)
 
     def on_closing(self):
+        """The close button: first the page saves what's typed and asks about anything unsaved
+        ("closeRequested"), then it answers closeWindow. If the page doesn't answer (it's broken
+        or still loading), a second click after a few seconds closes anyway."""
+        if self.page_ready and not self.close_allowed:
+            if self.close_asking:
+                return False  # the page is asking the user (returning False cancels this close)
+            waited = time.monotonic() - self.close_asked
+            if not self.close_asked or waited < CLOSE_WAIT:
+                if not self.close_asked:
+                    self.close_asked = time.monotonic()
+                    # Not from here: this runs on the window's thread, which posting an event waits for.
+                    threading.Thread(target=self.post_event, args=("closeRequested", {}), daemon=True).start()
+                return False
+            # The page never answered: close.
         save_placement(self.bounds, self.maximized)
 
     def on_closed(self):
