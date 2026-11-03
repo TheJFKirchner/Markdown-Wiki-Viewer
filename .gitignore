@@ -1,0 +1,10 @@
+# Made on each computer by setup.py, or by running the app.
+.venv/
+__pycache__/
+*.pyc
+# Output of make_share.py.
+Share/
+# Shortcuts hold this computer's paths.
+*.lnk
+# Wiki content kept next to the app: it's data, not part of the app.
+Sample Wikis/

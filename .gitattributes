@@ -1,0 +1,4 @@
+# The Mac launcher must keep Unix line endings, and the Windows one Windows line endings,
+# whichever computer commits them.
+*.command text eol=lf
+*.cmd text eol=crlf

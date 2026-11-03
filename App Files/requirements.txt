@@ -1,0 +1,8 @@
+# WikiApp's Python packages, installed into App Files/.venv by setup.py.
+# The versions are the ones it was tested with; newer ones should work too. The agent SDK is held
+# to 0.2.x: Ingest switches off parts of Claude Code by name, so raise it only after re-checking
+# ingest/AGENT.md against the new version.
+pywebview>=6.2.1          # the app window (WebView2 on Windows, WebKit on macOS)
+claude-agent-sdk~=0.2.176 # Ingest's agent
+pyyaml>=6.0.3             # Ingest: reading frontmatter
+pywin32>=312; sys_platform == "win32"  # Windows: the taskbar identity that makes the window pinnable

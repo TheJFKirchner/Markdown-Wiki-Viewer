@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WikiApp</title>
+  <link rel="stylesheet" href="css/styles.css">
+  <!-- Saved settings (served by the host from its settings.json; see persist.js), then the
+       script that syncs them with the browser storage. Both run before the app. -->
+  <script src="settings.js"></script>
+  <script src="js/persist.js"></script>
+  <script src="lib/force-graph.min.js"></script>
+  <script type="module" src="js/main.js"></script>
+</head>
+<body>
+  <div id="app">
+    <nav id="rail" class="rail" aria-label="Views">
+      <button id="toggle-sidebar" class="rail-button rail-toggle" title="Hide the sidebar (Ctrl+\)" aria-label="Hide the sidebar" aria-expanded="true">
+        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9 4v16"/><path class="toggle-arrow" d="m15 10-2 2 2 2"/></svg>
+      </button>
+      <span class="rail-sep"></span>
+      <button id="rail-graph" class="rail-button active" data-view="graph" title="Graph (Ctrl+1)" aria-label="Graph">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><circle cx="6" cy="18" r="2"/><path d="M12 12 5 6M12 12l7-6M12 12l6 6M12 12l-6 6"/></svg>
+      </button>
+      <button id="rail-note" class="rail-button" data-view="note" title="Page (Ctrl+2)" aria-label="Page">
+        <svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>
+      </button>
+      <button id="rail-notes" class="rail-button" data-view="notes" title="Notes (Ctrl+3)" aria-label="Notes">
+        <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+        <span id="notes-badge" class="rail-badge"></span>
+      </button>
+      <button id="rail-tasks" class="rail-button" data-view="tasks" title="Tasks (Ctrl+4)" aria-label="Tasks">
+        <svg viewBox="0 0 24 24"><path d="m4 7 2 2 4-4M4 17l2 2 4-4M13 7h7M13 17h7"/></svg>
+        <span id="tasks-badge" class="rail-badge"></span>
+      </button>
+      <button id="rail-ingest" class="rail-button" data-view="ingest" title="Ingest (Ctrl+5)" aria-label="Ingest">
+        <svg viewBox="0 0 24 24"><path d="M4 13h4l1.5 3h5L16 13h4"/><path d="M4 13 6.5 5.5A1.5 1.5 0 0 1 7.9 4.5h8.2a1.5 1.5 0 0 1 1.4 1L20 13v5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18z"/><path d="M12 7v5M9.5 9.5 12 12l2.5-2.5"/></svg>
+        <span id="ingest-badge" class="rail-badge"></span>
+      </button>
+    </nav>
+
+    <aside id="sidebar">
+      <header class="sidebar-header">
+        <span class="vault-name">Workspace</span>
+        <button id="collapse-folders" class="icon-button" title="Collapse folders one level (press again to collapse more)">
+          <svg viewBox="0 0 24 24"><path d="m7 11 5-5 5 5M7 18l5-5 5 5"/></svg>
+        </button>
+        <button id="add-folder" class="icon-button" title="Add a folder">
+          <svg viewBox="0 0 24 24"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2h8.4A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5zM12 10v6M9 13h6"/></svg>
+        </button>
+      </header>
+      <section id="notes-panel" class="notes-panel" aria-label="Notes"></section>
+      <nav id="explorer" class="explorer" aria-label="Files"></nav>
+      <footer id="signature" class="signature-corner"></footer>
+    </aside>
+
+    <div id="resizer" class="resizer" title="Drag to resize"></div>
+
+    <main id="main">
+      <div class="tabbar">
+        <span id="view-title" class="view-title">Graph</span>
+        <span class="tabbar-spacer"></span>
+        <div id="search" class="search"></div>
+        <span id="stats" class="stats"></span>
+      </div>
+
+      <section id="graph-view" class="view">
+        <div id="graph"></div>
+        <aside id="graph-panel" class="graph-panel"></aside>
+      </section>
+
+      <section id="tasks-view" class="view" hidden></section>
+
+      <section id="note-view" class="view" hidden>
+        <article id="note" class="note"></article>
+        <div id="editor" class="editor" hidden></div>
+      </section>
+
+      <section id="notes-view" class="view" hidden></section>
+
+      <section id="ingest-view" class="view" hidden></section>
+
+      <section id="welcome" class="welcome" hidden>
+        <h1>WikiApp</h1>
+        <p>Add folders of Markdown notes, such as a personal wiki and a team wiki, to see their files and how they link together.</p>
+        <button id="welcome-open" class="primary-button">Add folder</button>
+      </section>
+    </main>
+  </div>
+
+  <div id="folder-dialog" class="dialog-backdrop" hidden></div>
+  <div id="ingest-dialog" class="dialog-backdrop" hidden></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
