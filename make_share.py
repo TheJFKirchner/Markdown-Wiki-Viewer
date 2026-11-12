@@ -7,9 +7,12 @@ Writes <output>/WikiApp/ and <output>/WikiApp.zip (default output: Share/ next t
   WikiApp.cmd, WikiApp.command, the docs, .gitignore, .gitattributes
 In the zip, WikiApp.command is marked runnable, so a Mac can double-click it once unzipped.
 
-No wiki content goes with it: Sample Wikis/ is never copied, nor the WikiApp.lnk shortcut (it holds
-this computer's path), nor anything outside this folder, such as your settings in ~/.wikiapp
-(or %LOCALAPPDATA%\\WikiApp for the exe). Afterwards every copied file is checked for your Windows user name.
+No wiki content or private data goes with it: Sample Wikis/ is never copied, nor your private
+.wiki folder (settings, prompts, progress) wherever it is, nor anything outside this folder.
+App Files/ goes as a whole (code, the shipped prompts in agents/ and agents/messages/, the
+templates in app/templates/ and app/templates/starters/, and the tests), minus the retired note
+taker's prompt. The agentlib library is not included: the other person needs their own copy next
+to the app (see README). Afterwards every copied file is checked for your Windows user name.
 """
 
 import getpass
@@ -22,13 +25,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 TOP_FILES = ["WikiApp.cmd", "WikiApp.command", "README.md", "TECHNICAL.md", "CLAUDE.md", ".gitignore", ".gitattributes"]
-SKIP_DIRS = {".venv", "__pycache__"}
+SKIP_DIRS = {".venv", "__pycache__", ".pytest_cache", ".wiki"}  # .wiki: someone's private folder
 SKIP_SUFFIXES = {".pyc", ".pyo"}
+SKIP_PATHS = {Path("App Files") / "agents" / "note-taker"}       # retired: nothing reads it
 MARKER = ".made-by-make_share"  # next to a WikiApp folder this script built, so a rebuild may replace it
 
 
 def ignore(folder, names):
-    return [n for n in names if n in SKIP_DIRS or Path(n).suffix in SKIP_SUFFIXES]
+    here = Path(folder).resolve()
+    return [n for n in names if n in SKIP_DIRS or Path(n).suffix in SKIP_SUFFIXES
+            or any(here / n == (ROOT / p).resolve() for p in SKIP_PATHS)]
 
 
 def remove(folder):
@@ -89,7 +95,7 @@ def mentions_of_user(folder):
 
 def main():
     out = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / "Share"
-    inside = [ROOT / "App Files", ROOT / "Sample Wikis"]
+    inside = [ROOT / "App Files", ROOT / "Sample Wikis", ROOT / ".wiki"]
     if out == ROOT or any(out == f or f in out.parents for f in inside):
         sys.exit("Pick an output folder that isn't part of the app or the wikis.")
 

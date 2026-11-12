@@ -24,7 +24,7 @@ start "" "%VENV%\pythonw.exe" "%APP%\host\wikiapp.py" %*
 exit /b 0
 
 :nopython
-echo WikiApp needs Python 3.10 or newer. Install it from https://www.python.org/downloads/
+echo WikiApp needs Python 3.11 or newer. Install it from https://www.python.org/downloads/
 echo (tick "Add python.exe to PATH"), then start WikiApp again.
 pause
 exit /b 1

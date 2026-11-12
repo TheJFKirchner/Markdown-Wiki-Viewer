@@ -5,10 +5,12 @@ figures are what the same tokens would cost at API prices, for comparing runs an
 """
 
 # List prices, dollars per million tokens, by model family (Haiku 5.5, Sonnet 5.5, Opus 5.5,
-# Fable 5.1). Used for each request's cost in the transcript, the "plain Claude Code" estimate,
-# and the run's cost if Claude Code doesn't report one. Cache writes are priced at the 5-minute
+# Fable 5.1). A name is matched against these in order, so an older generation that costs more is
+# listed first, by its version (Haiku 4.5, the model the `haiku` alias means in older Claude Code).
+# Used for the "plain Claude Code" estimate, and the run's cost if the engine doesn't report one. Cache writes are priced at the 5-minute
 # rate (1.25x input). This is a set assumption, not measured.
 PRICES = {
+    "haiku-4": {"input": 1.00, "cache_write": 1.25, "cache_read": 0.10, "output": 5.00},
     "haiku": {"input": 0.10, "cache_write": 0.125, "cache_read": 0.01, "output": 0.50},
     "sonnet": {"input": 2.00, "cache_write": 2.50, "cache_read": 0.20, "output": 10.00},
     "opus": {"input": 4.00, "cache_write": 5.00, "cache_read": 0.20, "output": 20.00},
@@ -26,13 +28,24 @@ def prices_for(model: str) -> dict:
     return next((PRICES[family] for family in PRICES if family in name), PRICES["sonnet"])
 
 
-def tokens_of(usage: dict | None) -> dict:
-    usage = usage or {}
+def tokens_of(usage) -> dict:
+    """Token counts in the app's own names, from agentlib's Usage, or from a dict with the API's
+    names (input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens: what
+    sessions/secondbrain/llm.py passes), or None."""
+    if isinstance(usage, dict) or usage is None:
+        usage = usage or {}
+        get = usage.get
+        return {
+            "input": int(get("input_tokens") or 0),
+            "cacheWrite": int(get("cache_creation_input_tokens") or 0),
+            "cacheRead": int(get("cache_read_input_tokens") or 0),
+            "output": int(get("output_tokens") or 0),
+        }
     return {
-        "input": int(usage.get("input_tokens") or 0),
-        "cacheWrite": int(usage.get("cache_creation_input_tokens") or 0),
-        "cacheRead": int(usage.get("cache_read_input_tokens") or 0),
-        "output": int(usage.get("output_tokens") or 0),
+        "input": int(getattr(usage, "input_tokens", 0) or 0),
+        "cacheWrite": int(getattr(usage, "cache_write_tokens", 0) or 0),
+        "cacheRead": int(getattr(usage, "cache_read_tokens", 0) or 0),
+        "output": int(getattr(usage, "output_tokens", 0) or 0),
     }
 
 
@@ -49,21 +62,25 @@ def plain_claude_code_cost(cost: float, requests: int, prices: dict) -> dict:
     return {"cost": round(cost + added, 4), "extraTokensPerRequest": extra, "assumptions": PLAIN_CLAUDE_CODE_EXTRA}
 
 
-def run_totals(result, requests: set, reads: int, cards: int, prices: dict) -> dict:
-    """The totals for one conversation turn (the run, or one feedback round), from Claude Code's result."""
-    tokens = tokens_of(result.usage if result else None)
-    cost = result.total_cost_usd if result and result.total_cost_usd is not None else priced(tokens, prices)
+def run_totals(reply, reads: int, cards: int, prices: dict) -> dict:
+    """The totals for one conversation turn (the run, or one feedback round), from agentlib's Reply.
+    Its cost_usd is this turn's alone (a continued conversation is opened with the cost so far).
+    When the engine reports no cost (a turn that failed midway), the tokens are priced instead."""
+    tokens = tokens_of(reply.usage if reply else None)
+    reported = reply.cost_usd if reply else 0
+    cost = reported if reported or not any(tokens.values()) else priced(tokens, prices)
+    requests = reply.api_calls if reply else 0
     return {
         "cost": round(cost, 4),
-        "plainClaudeCode": plain_claude_code_cost(cost, len(requests), prices),
+        "plainClaudeCode": plain_claude_code_cost(cost, requests, prices),
         "tokens": tokens,
-        "requests": len(requests),
-        "turns": result.num_turns if result else 0,
+        "requests": requests,
+        "turns": requests,
         "reads": reads,
         "cards": cards,
-        "durationSeconds": round(result.duration_ms / 1000, 1) if result else None,
-        "stopReason": result.stop_reason if result else None,
-        "subtype": result.subtype if result else None,
+        "durationSeconds": round(reply.duration_s, 1) if reply and reply.duration_s else None,
+        "stopReason": reply.stop_reason if reply else None,
+        "errorKind": reply.error_kind if reply else None,
     }
 
 

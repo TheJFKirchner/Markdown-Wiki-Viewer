@@ -31,35 +31,13 @@ export function cleanNotesDir(text) {
     .join('/');
 }
 
-// Used when the Templates folder doesn't have a file of that name (yet).
-export const DEFAULT_TEMPLATES = {
-  Daily: [
-    '---',
-    'type: daily',
-    'started: {{date}}',
-    'status: open',
-    'tags: [daily-note]',
-    '---',
-    '# Daily · {{day}}',
-    '',
-    '## Focus',
-    '- ',
-    '',
-  ].join('\n'),
-  Weekly: [
-    '---',
-    'type: weekly',
-    'started: {{date}}',
-    'status: open',
-    'tags: [weekly-note]',
-    '---',
-    '# Week {{week}} · {{day}}',
-    '',
-    '## Goals this week',
-    '- ',
-    '',
-  ].join('\n'),
-};
+// Used when a wiki's Templates folder doesn't have a file of that name: the Daily and Weekly
+// templates from the path list (template.daily, template.weekly), read through the host and given
+// to setDefaultTemplates() when the app starts and whenever they change. No text is kept here.
+let defaultTemplates = {};
+export function setDefaultTemplates(map) {
+  defaultTemplates = { ...map };
+}
 
 export const isNotesPath = (path, dir = DEFAULT_NOTES_DIR) => path.toLowerCase().startsWith(`${dir.toLowerCase()}/`);
 export const isTemplatePath = (path) => path.startsWith(`${TEMPLATES_DIR}/`);
@@ -70,21 +48,6 @@ export const isTemplatePath = (path) => path.startsWith(`${TEMPLATES_DIR}/`);
 // Older wikis kept quick-note templates directly in Templates/; those still count.
 export const NOTE_TEMPLATES_DIR = `${TEMPLATES_DIR}/Notes`;
 export const PAGE_TEMPLATES_DIR = `${TEMPLATES_DIR}/Pages`;
-// The two templates a newly linked folder without a Templates folder gets: files in the app's
-// own app/templates/ folder, copied to the same paths in the wiki.
-export const SEED_TEMPLATES = [`${NOTE_TEMPLATES_DIR}/Sample note.md`, `${PAGE_TEMPLATES_DIR}/Sample page.md`];
-export const PAGE_TEMPLATE_STARTER = [
-  '---',
-  'description: When to use this template, in one line. Claude reads this to choose a template for a new page.',
-  'tags: []',
-  '---',
-  '# {{title}}',
-  '',
-  '## Summary',
-  '',
-  '## Details',
-  '',
-].join('\n');
 
 // What the Notes list shows about a note.
 export function noteInfo(note) {
@@ -103,7 +66,7 @@ export function noteInfo(note) {
 // by the files in its Templates/Notes folder (or, in older wikis, directly in Templates).
 // -> [{ name, id (null for a built-in one not saved yet), text }]
 export function templatesIn(vault, alias) {
-  const byName = new Map(Object.entries(DEFAULT_TEMPLATES).map(([name, text]) => [name.toLowerCase(), { name, id: null, text }]));
+  const byName = new Map(Object.entries(defaultTemplates).map(([name, text]) => [name.toLowerCase(), { name, id: null, text }]));
   const directlyIn = (path, dir) => path.startsWith(`${dir}/`) && path.indexOf('/', dir.length + 1) < 0;
   const notes = [...(vault?.notes.values() || [])].filter((n) => n.folder === alias);
   // Templates/Notes last, so its file wins over an older one of the same name.

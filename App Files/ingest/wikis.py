@@ -1,9 +1,15 @@
 """The wikis as the ingest agent sees them, and the index it chooses pages from.
 
 Scans each wiki folder the way the app's host does (dot-folders and hidden files are skipped),
-finds the page a [[link]] points to with the same rules as app/js/vault.js, and writes one index
-per wiki to <wiki>/.wiki/index.md: a line per page with its id, description, tags, sections and
-links, then the wiki's page templates.
+finds the page a [[link]] points to with the same rules as app/js/vault.js, and builds one index
+per wiki: a line per page with its id, description, tags, sections and links, then the wiki's
+page templates. A copy of each index is kept in the app's private folder (the path list's
+"wiki.<alias>.index"), never in the wiki.
+
+Where each wiki's rules file and templates folder are comes from the path list
+(host/pathlist.py): by default <wiki>/wiki_rules.md, and the wiki's own Templates folder if it has
+one, otherwise the app's private templates. A job may also give them per wiki ("rules",
+"templates").
 
 On its own:  python wikis.py team="C:\\wikis\\team" personal="C:\\wikis\\personal" [--notes-dir Notes]
 """
@@ -19,6 +25,11 @@ from pathlib import Path
 
 import yaml
 
+_HOST = str(Path(__file__).resolve().parent.parent / "host")
+if _HOST not in sys.path:
+    sys.path.append(_HOST)
+import pathlist  # noqa: E402  (every path in the app comes from the path list)
+
 NOTE_EXT = re.compile(r"\.(md|markdown)$", re.I)
 SCRIPT_EXT = re.compile(r"\.(sql|py|ipynb|r|js|mjs|ts|ps1|psm1|sh|bash|bat|cmd|vbs|rb|pl|lua|kql|dax)$", re.I)
 WIKILINK = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
@@ -27,8 +38,8 @@ CODE = re.compile(r"```[\s\S]*?```|`[^`\n]*`")
 TEMPLATES_DIR = "Templates"               # everything in it is a template, never a wiki page:
 PAGE_TEMPLATES_DIR = "Templates/Pages"    #   page templates, for the agent's new pages
                                           #   (Templates/Notes: quick-note templates, for the app)
-RULES_FILE = "wiki_rules.md"
-INDEX_DIR = ".wiki"
+RULES_FILE = "wiki_rules.md"              # the usual name of a wiki's rules file (the path list decides)
+INDEX_DIR = ".wiki"                       # older versions wrote <wiki>/.wiki/index.md; nothing is written there now
 MAX_TEXT_BYTES = 2 * 1024 * 1024
 
 
@@ -41,12 +52,17 @@ class Page:
     kind: str      # page | note | template | page_template | rules | script
     root: Path
     _text: str | None = field(default=None, repr=False)
+    source: Path | None = None   # the file, when it isn't root/path (a template kept outside the wiki)
+
+    @property
+    def file(self) -> Path:
+        return self.source or self.root / self.path
 
     @property
     def text(self) -> str:
         """The file's text: BOM removed, line endings as \\n (the form edits are made against)."""
         if self._text is None:
-            self._text = read_text(self.root / self.path)
+            self._text = read_text(self.file)
         return self._text
 
 
@@ -128,14 +144,47 @@ class Wikis:
     """Every open wiki, in workspace order (earlier wikis win ties, as in the app)."""
 
     def __init__(self, wikis: list[dict], notes_dir: str = "Notes"):
+        """wikis: [{"alias", "root"}], in workspace order. Each may also give "rules" (its rules
+        file) and "templates" (its templates folder); otherwise the path list says where they are."""
         self.aliases = [w["alias"] for w in wikis]
         self.roots = {w["alias"]: Path(w["root"]) for w in wikis}
         self.order = {alias: i for i, alias in enumerate(self.aliases)}
         self.notes_dir = notes_dir.strip("/") or "Notes"
+        self.rules_files: dict[str, Path | None] = {}
+        self.templates_dirs: dict[str, Path | None] = {}
+        self.index_files: dict[str, Path | None] = {}
+        for w in wikis:
+            places = pathlist.wiki_paths(w["alias"], w["root"])
+            self.rules_files[w["alias"]] = Path(w["rules"]) if w.get("rules") else places["rules"]
+            self.templates_dirs[w["alias"]] = Path(w["templates"]) if w.get("templates") else places["templates"]
+            self.index_files[w["alias"]] = places["index"]
         self.pages: dict[str, Page] = {}
         self.folders: dict[str, list[str]] = {}
+        self.private_files = self._private_files()
         for alias in self.aliases:
             self._scan(alias)
+            self._scan_outside_templates(alias)
+
+    def _private_files(self) -> list[Path]:
+        """The person's own tag files and capture rules file: not wiki pages, so Promotion's agent
+        can neither list nor read them even when they sit inside a wiki folder."""
+        found: list[Path] = []
+        for name in ("personal_capture_rules", "tag_list_reference"):
+            try:
+                value = pathlist.path(name)
+            except Exception:
+                value = None
+            if value:
+                found.append(Path(value))
+        for root in self.roots.values():
+            try:
+                found.append(Path(pathlist.personal_tags_path(root)))
+            except Exception:
+                pass
+        return found
+
+    def _is_private(self, file: Path) -> bool:
+        return any(_same(file, other) for other in self.private_files)
 
     def _scan(self, alias: str) -> None:
         root = self.roots[alias]
@@ -146,11 +195,11 @@ class Wikis:
             folders += [(here / d).relative_to(root).as_posix() for d in dirnames]
             for name in sorted(filenames):
                 file = here / name
-                if is_hidden(file):
+                if is_hidden(file) or self._is_private(file):
                     continue
                 path = file.relative_to(root).as_posix()
                 if NOTE_EXT.search(name):
-                    kind = self._kind(path)
+                    kind = self._kind(path, alias)
                     page = Page(f"{alias}:{path}", alias, path, NOTE_EXT.sub("", name), kind, root)
                 elif SCRIPT_EXT.search(name):
                     page = Page(f"{alias}:{path}", alias, path, name, "script", root)
@@ -159,7 +208,24 @@ class Wikis:
                 self.pages[page.id] = page
         self.folders[alias] = folders
 
-    def _kind(self, path: str) -> str:
+    def _scan_outside_templates(self, alias: str) -> None:
+        """Page templates kept outside the wiki (the app's private templates, or a folder the path
+        list points to): their Pages/ files join the wiki as page templates, read-only, with ids
+        as if they were in the wiki's Templates/Pages folder."""
+        folder = self.templates_dirs.get(alias)
+        root = self.roots[alias]
+        if folder is None or _same(folder, root / TEMPLATES_DIR) or not (folder / "Pages").is_dir():
+            return
+        pages = folder / "Pages"
+        for file in sorted(pages.rglob("*")):
+            if not file.is_file() or not NOTE_EXT.search(file.name) or any(is_hidden(p) for p in file.relative_to(pages).parents if p.name) or is_hidden(file):
+                continue
+            path = f"{PAGE_TEMPLATES_DIR}/{file.relative_to(pages).as_posix()}"
+            page_id = f"{alias}:{path}"
+            if page_id not in self.pages:
+                self.pages[page_id] = Page(page_id, alias, path, NOTE_EXT.sub("", file.name), "page_template", root, source=file)
+
+    def _kind(self, path: str, alias: str | None = None) -> str:
         lower = path.lower()
         if lower.startswith(self.notes_dir.lower() + "/"):
             return "note"
@@ -167,9 +233,23 @@ class Wikis:
             return "page_template"
         if path.startswith(TEMPLATES_DIR + "/"):
             return "template"
-        if lower == RULES_FILE:
+        rules = self.rules_files.get(alias) if alias else None
+        if rules is not None and alias in self.roots:
+            if _same(self.roots[alias] / path, rules):
+                return "rules"
+        elif lower == RULES_FILE:
             return "rules"
         return "page"
+
+    def rules_text(self, alias: str) -> str | None:
+        """The wiki's rules (the whole file), or None when it has no rules file."""
+        page = next((p for p in self.pages.values() if p.wiki == alias and p.kind == "rules"), None)
+        if page is not None:
+            return page.text
+        rules = self.rules_files.get(alias)
+        if rules is not None and rules.is_file():
+            return read_text(rules)
+        return None
 
     def wiki_pages(self, alias: str | None = None) -> list[Page]:
         return [p for p in self.pages.values() if p.kind == "page" and (alias is None or p.wiki == alias)]
@@ -235,6 +315,8 @@ class Wikis:
             properties, body = frontmatter(text)
             parts = [page.name, page.id]
             description = properties.get("description")
+            if not (isinstance(description, str) and description.strip()):
+                description = properties.get("summary")   # personal topic pages keep their one-liner here
             parts.append(description.strip() if isinstance(description, str) and description.strip() else "(no description)")
             tags = tags_of(properties)
             if tags:
@@ -264,18 +346,20 @@ class Wikis:
             return ""
 
     def write_indexes(self, today: str | None = None) -> dict[str, str]:
-        """Writes <wiki>/.wiki/index.md for every wiki (a copy to look at; the run uses the text,
-        so a wiki that can't be written to, such as a read-only share, still works).
-        -> alias -> index text."""
+        """Builds every wiki's index, and keeps a copy of each where the path list says (by default
+        <private folder>/indexes/<alias>.md), to look at. The run uses the text, so when there is no
+        private folder, or its folder is gone, nothing is written and the run still works.
+        Nothing is ever written into a wiki. -> alias -> index text."""
         texts = {}
         for alias in self.aliases:
             text = self.index_text(alias, today)
-            folder = self.roots[alias] / INDEX_DIR
-            try:
-                folder.mkdir(exist_ok=True)
-                (folder / "index.md").write_text(text, encoding="utf-8", newline="\n")
-            except OSError:
-                pass
+            target = self.index_files.get(alias)
+            if target is not None:
+                try:
+                    pathlist.ensure_parent(target)
+                    pathlist.write_text_atomic(target, text)
+                except (OSError, pathlist.PathMissing):
+                    pass
             texts[alias] = text
         return texts
 
@@ -295,8 +379,14 @@ def main(argv: list[str]) -> int:
         return 2
     model = Wikis(wikis, notes_dir)
     for alias in model.write_indexes():
-        print(f"Wrote {model.roots[alias] / INDEX_DIR / 'index.md'} ({len(model.wiki_pages(alias))} pages)")
+        target = model.index_files.get(alias)
+        where = f"Wrote {target}" if target is not None and target.is_file() else "Built (no private folder to keep a copy in)"
+        print(f"{where}: index of {alias} ({len(model.wiki_pages(alias))} pages)")
     return 0
+
+
+def _same(a: Path, b: Path) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
 if __name__ == "__main__":

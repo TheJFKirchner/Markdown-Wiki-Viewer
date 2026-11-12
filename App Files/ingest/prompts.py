@@ -1,37 +1,55 @@
 """The text the agent is given: its instructions, its first message, and a feedback message.
 
-  write_instructions()      the instructions (the "system prompt"): agent-prompt.md, with the user's
-                            own notes and each wiki's rules filled in.
-  write_first_message()     the first message: today's date, each wiki's index, then the notes.
+  agent_prompt()            the agent's own prompt file (agents/agentfiles.py).
+  write_instructions()      the instructions (the "system prompt"): that prompt, then each wiki's rules.
+  write_first_message()     the first message: today's date, each wiki's index, then the personal pages.
   write_feedback_message()  the message that continues a run with the reviewer's feedback.
+  write_answers_message()   the message that continues a promotion with the reviewer's answers.
+
+The wording is in prompt files the person can edit (the path list's prompt slots, see
+host/pathlist.py; the shipped defaults are in agents/messages/). The structure around it (the
+<index>, <note>, <feedback> and <answer> blocks) stays here, because the agent's tools and the
+app rely on it.
 
 Every word here reaches the agent: keep ingest/AGENT.md in step with it.
 """
 
+import sys
 from pathlib import Path
 
 from wikis import Wikis, frontmatter
 
-INSTRUCTIONS_FILE = Path(__file__).resolve().parent / "agent-prompt.md"
+APP_FILES = Path(__file__).resolve().parent.parent
+for _folder in (APP_FILES / "agents", APP_FILES / "host"):
+    if str(_folder) not in sys.path:
+        sys.path.append(str(_folder))
+import agentfiles  # noqa: E402
+import pathlist  # noqa: E402
+
+SKIPPED_ANSWER = "(Skipped. Leave this point out.)"
 
 
-def write_instructions(wikis: Wikis, users_notes: str, today: str) -> str:
+def agent_prompt(agent_id: str) -> str:
+    """The body of the agent's prompt file."""
+    return agentfiles.system(agent_id)
+
+
+def wikis_section() -> str:
+    return pathlist.read_prompt("prompt.wikis-section").strip()
+
+
+def write_instructions(wikis: Wikis, prompt: str, today: str) -> str:
     rules = []
     for alias in wikis.aliases:
-        rules_page = next((p for p in wikis.pages.values() if p.wiki == alias and p.kind == "rules"), None)
-        text = rules_page.text.strip() if rules_page else "No rules file. Follow the existing pages' style."
+        text = wikis.rules_text(alias)
+        text = text.strip() if text is not None else "No rules file. Follow the existing pages' style."
         rules.append(f'### Wiki "{alias}"\n\n<rules>\n{text}\n</rules>')
-    notes = ""
-    if users_notes.strip():
-        notes = "## Notes from the user\n\n<user_notes>\n" + users_notes.strip() + "\n</user_notes>\n"
-    text = INSTRUCTIONS_FILE.read_text(encoding="utf-8").replace("\r\n", "\n")
-    return (text.replace("{{user_notes}}", notes)
-                .replace("{{wikis}}", "\n\n".join(rules))
-                .replace("{{date}}", today))
+    return prompt.strip().replace("{{date}}", today) + "\n\n" + wikis_section() + "\n\n" + "\n\n".join(rules) + "\n"
 
 
 def write_first_message(wikis: Wikis, indexes: dict[str, str], note_ids: list[str], today: str) -> str:
-    parts = [f"Today is {today}. Ingest the notes below into the wikis."]
+    """A promotion's first message: the opening line, each wiki's index, then the personal pages."""
+    parts = [pathlist.read_prompt("prompt.promotion-first-message", date=today).strip()]
     for alias in wikis.aliases:
         parts.append(f'<index wiki="{alias}">\n{indexes[alias].strip()}\n</index>')
     for note_id in note_ids:
@@ -42,15 +60,6 @@ def write_first_message(wikis: Wikis, indexes: dict[str, str], note_ids: list[st
         )
         parts.append(f'<note id="{note_id}"{attrs}>\n{note.text.strip()}\n</note>')
     return "\n\n".join(parts) + "\n"
-
-
-FEEDBACK_MESSAGE = """The reviewer has gone through the cards.{decided}
-
-Feedback on {count}:
-
-{feedback}
-
-Revise each of those proposals to follow its feedback: call propose_page again for the same page, which replaces that card. Read pages first if you need to. If feedback means a change shouldn't be made at all, don't call a tool for it; say so in one sentence that names the card. Don't propose anything else."""
 
 
 def page_name(card: dict) -> str:
@@ -69,4 +78,18 @@ def write_feedback_message(asked: list[tuple[dict, str]], decided: dict[str, str
         f'<feedback card="{card["id"]}" kind="{"new page" if card["kind"] == "new" else "edit"}" page="{page_name(card)}" summary="{card["summary"]}">\n{text.strip()}\n</feedback>'
         for card, text in asked)
     count = f"card {asked[0][0]['id']}" if len(asked) == 1 else f"{len(asked)} cards"
-    return FEEDBACK_MESSAGE.format(decided=summary, count=count, feedback=feedback)
+    template = pathlist.read_prompt("prompt.ingest-feedback").strip()
+    return pathlist.fill(template, {"decided": summary, "count": count, "feedback": feedback})
+
+
+def write_answers_message(questions: list[dict], answers: dict[str, str]) -> str:
+    """The message that continues a promotion with the reviewer's answers to the agent's questions.
+    answers: question id -> the answer's text, or "" for a question the reviewer skipped."""
+    blocks = []
+    for q in questions:
+        answer = (answers.get(q["id"]) or "").strip()
+        blocks.append(f'<answer question="{q["id"]}" about="{q["about"]}">\n' + (answer or SKIPPED_ANSWER) + "\n</answer>")
+    template = pathlist.read_prompt("prompt.ingest-answers").strip()
+    if not blocks:
+        template = template.replace("{{answers}}\n\n", "").replace("\n\n{{answers}}", "")
+    return pathlist.fill(template, {"answers": "\n\n".join(blocks)})

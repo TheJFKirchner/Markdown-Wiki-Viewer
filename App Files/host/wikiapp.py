@@ -1,22 +1,24 @@
 """WikiApp host for Windows and macOS: a window that runs the HTML/JS app in ../app, using
-pywebview (WebView2 on Windows, WebKit on macOS). The page talks to it through JSON messages;
-see app/js/bridge.js for the other side. It does what WikiApp.cs does, so the page works the
-same under either host.
+pywebview (the Edge web view on Windows, WebKit on macOS). The page talks to it through JSON
+messages; see app/js/bridge.js for the other side.
 
 Start it with WikiApp.cmd (Windows) or WikiApp.command (macOS), which set up the Python
 environment first. Folders given on the command line join the workspace.
 
-Per-user data lives in ~/.wikiapp (or WIKIAPP_DATA_DIR): settings.json, window.txt, ingest/,
-ingest-runs/ and instance.json. WIKIAPP_DEBUG_PORT=<port> turns on remote debugging (WebView2).
+Per-user data lives in one private folder named .wiki, at a place the person chooses on the first
+start (see appfolder.py); every path in it, and every other path the app uses, comes from the
+path list (pathlist.py). Until a place is chosen nothing is written. WIKIAPP_DATA_DIR names the
+folder directly (developer and test runs). WIKIAPP_DEBUG_PORT=<port> turns on remote debugging
+(Windows).
 """
 
 import ctypes
+import hashlib
 import http.server
 import json
 import mimetypes
 import os
 import secrets
-import shutil
 import sys
 import threading
 import time
@@ -28,17 +30,16 @@ from pathlib import Path
 os.environ.setdefault("PYWEBVIEW_LOG", "warning")  # read when pywebview is imported
 import webview
 
+import appfolder
 import notefiles
+import pathlist
 from ingestruns import IngestRuns, write_atomic
+from sessionruns import SessionRuns
 
 APP_FILES = Path(__file__).resolve().parent.parent
 APP_DIR = APP_FILES / "app"
 ICON = Path(__file__).resolve().parent / "app.ico"
 APP_ID = "WikiApp.WikiApp"  # Windows taskbar identity: groups and pins the window as WikiApp
-DATA_DIR = Path(os.environ.get("WIKIAPP_DATA_DIR") or Path.home() / ".wikiapp")
-SETTINGS_FILE = DATA_DIR / "settings.json"
-PLACEMENT_FILE = DATA_DIR / "window.txt"
-INSTANCE_FILE = DATA_DIR / "instance.json"
 BACKGROUND = "#1e1e1e"
 CLOSE_WAIT = 4.0  # seconds a page that doesn't answer "closeRequested" gets; a click after that closes
 MIME = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".html": "text/html",
@@ -50,42 +51,33 @@ MIME = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
 # See app/js/persist.js.
 
 def settings_script():
-    """Served as settings.js: the saved settings, and which host the page runs in."""
+    """Served as settings.js: the saved settings, the mark that tells the page it runs in the app
+    rather than a plain browser, and whether a place for the private folder has been chosen (if
+    not, the page asks first: see firstRunState)."""
     saved = "null"
+    file = pathlist.path("settings")
     try:
-        text = SETTINGS_FILE.read_text(encoding="utf-8-sig").strip()
-        if isinstance(json.loads(text), dict):  # only hand over a JSON object
+        text = file.read_text(encoding="utf-8-sig").strip() if file else ""
+        if text and isinstance(json.loads(text), dict):  # only hand over a JSON object
             saved = text
     except (OSError, ValueError):
         pass  # no file yet, or a damaged one: the page starts from its defaults
-    return f"window.__wikiappHost = 'python';\nwindow.__savedSettings = {saved};\n"
+    chosen = "true" if pathlist.is_chosen() else "false"
+    return (f"window.__wikiappHost = 'python';\nwindow.__wikiappFolderChosen = {chosen};\n"
+            f"window.__savedSettings = {saved};\n")
 
 
 def save_settings(settings):
     if not isinstance(settings, dict):
         raise ValueError("settings must be an object")
-    write_atomic(SETTINGS_FILE, json.dumps(settings, ensure_ascii=False))
+    file = pathlist.path("settings")
+    if file is None:  # no place chosen yet: nothing is written anywhere
+        raise pathlist.PathMissing("Choose where WikiApp keeps its private folder first.")
+    write_atomic(file, json.dumps(settings, ensure_ascii=False))
 
-
-def migrate_from_windows_host():
-    """First start on a PC that used WikiApp.exe: bring over its settings, Ingest data and past runs.
-    Copies only; WikiApp.exe keeps its own."""
-    if os.name != "nt" or SETTINGS_FILE.exists() or "WIKIAPP_DATA_DIR" in os.environ:
-        return
-    old = Path(os.environ.get("LOCALAPPDATA", "")) / "WikiApp"
-    old_runs = Path(os.environ.get("TEMP", "")) / "WikiApp" / "ingest-runs"
-    try:
-        if (old / "settings.json").exists():
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-            for name in ("settings.json", "window.txt"):
-                if (old / name).exists():
-                    shutil.copy2(old / name, DATA_DIR / name)
-            if (old / "ingest").is_dir():
-                shutil.copytree(old / "ingest", DATA_DIR / "ingest", dirs_exist_ok=True)
-            if old_runs.is_dir():
-                shutil.copytree(old_runs, DATA_DIR / "ingest-runs", dirs_exist_ok=True)
-    except OSError:
-        pass  # not worth failing the start over
+# Older versions' data (~/.wikiapp, and what the retired Windows-only version left in
+# %LOCALAPPDATA%\WikiApp and %TEMP%\WikiApp\ingest-runs) is copied in when the person chooses a
+# place for the private folder: appfolder.migrate.
 
 
 # ---- Serving the app ---------------------------------------------------------------------------
@@ -141,15 +133,70 @@ class AppRequest(http.server.BaseHTTPRequestHandler):
 # Starting the app again brings the open window to the front instead of opening a second copy.
 
 def ask_running_copy_to_focus():
+    """True when another copy is running (it was asked to come forward). It is found through
+    instance.json in the private folder, or, before a place for that folder is chosen (the first
+    start), through the guard port below."""
     try:
-        info = json.loads(INSTANCE_FILE.read_text(encoding="utf-8"))
+        info = json.loads(pathlist.path("instance").read_text(encoding="utf-8"))
         if os.name == "nt":
             ctypes.windll.user32.AllowSetForegroundWindow(-1)  # let it take the foreground
         url = f"http://127.0.0.1:{int(info['port'])}/{info['token']}/__focus"
         with urllib.request.urlopen(url, timeout=2) as reply:
-            return reply.read() == b"ok"
-    except (OSError, ValueError, KeyError):
+            if reply.read() == b"ok":
+                return True
+    except (OSError, ValueError, KeyError, AttributeError):  # AttributeError: no place chosen yet
+        pass
+    try:
+        if os.name == "nt":
+            ctypes.windll.user32.AllowSetForegroundWindow(-1)
+        with urllib.request.urlopen(f"http://127.0.0.1:{guard_port()}{GUARD_PATH}", timeout=2) as reply:
+            return reply.read() == GUARD_REPLY
+    except (OSError, ValueError):
         return False
+
+
+# During the first start there is no private folder, so no instance.json. A copy started then
+# listens on a fixed local port worked out from where the app is; it answers one request (come
+# forward) and nothing else. Nothing is written to disk. If the port is taken, there's no guard.
+GUARD_PATH = "/wikiapp-focus"
+GUARD_REPLY = b"wikiapp-ok"
+
+
+def guard_port():
+    digest = hashlib.sha256(os.path.normcase(str(APP_FILES)).encode("utf-8")).digest()
+    return 20000 + int.from_bytes(digest[:2], "big") % 20000
+
+
+class GuardRequest(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        ok = self.path == GUARD_PATH
+        if ok:
+            self.server.wikiapp.bring_to_front()
+        body = GUARD_REPLY if ok else b""
+        self.send_response(200 if ok else 404)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class GuardServer(http.server.ThreadingHTTPServer):
+    allow_reuse_address = False  # never share the port (Windows would let a second copy bind it too)
+    daemon_threads = True
+
+
+def start_guard(host):
+    """The first-start guard server, or None when the port is taken."""
+    try:
+        server = GuardServer(("127.0.0.1", guard_port()), GuardRequest)
+    except OSError:
+        return None
+    server.daemon_threads = True
+    server.wikiapp = host
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 # ---- Messages from the page --------------------------------------------------------------------
@@ -178,7 +225,8 @@ class Host:
         self.startup_folders = startup_folders
         self.window = None
         self.watcher = notefiles.Watcher(lambda root: self.post_event("vaultChanged", {"root": root}))
-        self.ingest = IngestRuns(DATA_DIR, self.post_event)
+        self.ingest = IngestRuns(self.post_event)
+        self.sessions = SessionRuns()
         self.server = AppServer(self)
         self.bounds = None  # the window's last normal (not maximized) x, y, width, height
         self.maximized = False
@@ -194,6 +242,8 @@ class Host:
         if cmd == "pickFolder":
             chosen = self.window.create_file_dialog(webview.FileDialog.FOLDER)
             return chosen[0] if chosen else None
+        if cmd == "pickFile":  # start: a folder (or a file in it) to open the picker at
+            return self.pick_file(args.get("start"))
         if cmd == "scanVault":  # watch: false previews a folder in the Add folder window
             vault = notefiles.scan(text(args, "path"))
             if args.get("watch") is not False:
@@ -235,22 +285,110 @@ class Host:
                 self.close_allowed = True
                 self.window.destroy()
             return None
+        return self.dispatch_paths(cmd, args)
+
+    def dispatch_paths(self, cmd, args):
+        """The private folder, the path list, prompt files and engine settings (pathlist.py, appfolder.py)."""
+        if cmd == "firstRunState":  # candidate: a place being considered (checked: valid, error), previewed
+            candidate = args.get("candidate")
+            return appfolder.first_run_state(str(candidate) if "candidate" in args and candidate is not None else None)
+        if cmd == "chooseFolder":  # the first start: the place the person picked (the .wiki folder or its parent)
+            result = appfolder.choose_location(text(args, "path"))
+            self.write_instance()
+            return result
+        if cmd == "relocateFolder":  # mode: "move" | "adopt"
+            if self.ingest.running():
+                raise RuntimeError("Wait for the ingest run to finish first.")
+            result = appfolder.relocate(text(args, "path"), text(args, "mode"))
+            self.write_instance()
+            return result
+        if cmd == "dismissLeftovers":
+            appfolder.dismiss_leftovers()
+            return None
+        if cmd == "listPaths":
+            return pathlist.list_paths()
+        if cmd == "setPath":  # path "" puts the entry back to its default
+            entry = pathlist.set_path(text(args, "name"), args.get("path") or "")
+            if entry["name"] == "agentlib" and entry["exists"]:
+                self.install_agentlib()  # in the background; an "agentlibInstalled" event follows
+                entry = {**entry, "installing": True}
+            return entry
+        if cmd == "resetPrompt":
+            return pathlist.reset_prompt(text(args, "name"))
+        if cmd == "readPathFile":  # a prompt or template slot, or a wiki's rules file...
+            return pathlist.read_file(text(args, "name"))
+        if cmd == "writePathFile":  # expect: the text last read; refused if the file changed since
+            expect = args.get("expect")
+            return pathlist.write_file(text(args, "name"), text(args, "text"), expect if isinstance(expect, str) else None)
+        if cmd == "openPath":  # a file in its default app, a folder in the file manager
+            return appfolder.open_path(text(args, "name"))
+        if cmd == "getEngineSettings":  # also each agent's model: engines.<engine>.models.<agent id>
+            return pathlist.get_engine_settings()
+        if cmd == "setEngineSettings":  # e.g. {engines: {claude: {models: {"wiki-reviewer": "claude-opus-5"}}}}
+            return pathlist.set_engine_settings(args.get("settings"))
+        if cmd == "setAgentModel":  # the same, for one agent: {agent, model}; model "" = the default
+            return pathlist.set_agent_model(text(args, "agent"), args.get("model") or "")
+        if cmd == "connectionStatus":  # free: sends nothing
+            return appfolder.connection_status()
+        if cmd == "testConnection":  # ONE tiny real request (a fraction of a cent)
+            return appfolder.test_connection()
+        if cmd == "agentlibStatus":
+            return appfolder.agentlib_status()
+        if cmd == "installAgentlib":
+            self.install_agentlib()
+            return None
         return self.dispatch_ingest(cmd, args)
+
+    def pick_file(self, start=None):
+        folder = ""
+        if isinstance(start, str) and start.strip():
+            start_path = Path(start.strip())
+            folder = str(start_path if start_path.is_dir() else start_path.parent)
+            if not Path(folder).is_dir():
+                folder = ""
+        chosen = self.window.create_file_dialog(webview.FileDialog.OPEN, directory=folder)
+        if not chosen:
+            return None
+        return chosen[0] if isinstance(chosen, (list, tuple)) else str(chosen)
+
+    def install_agentlib(self):
+        def work():
+            try:
+                result = appfolder.install_agentlib()
+            except Exception as error:
+                result = {"ok": False, "message": str(error)}
+            self.post_event("agentlibInstalled", result)
+        threading.Thread(target=work, daemon=True).start()
+
+    def write_instance(self):
+        """instance.json: how a second start of the app finds this one. Only once a place is chosen."""
+        file = pathlist.path("instance")
+        if file is None or not file.parent.is_dir():
+            return
+        try:
+            write_atomic(file, json.dumps({"port": self.server.server_port, "token": self.server.token}))
+        except (OSError, pathlist.PathMissing):
+            pass
 
     def dispatch_ingest(self, cmd, args):
         """Ingest (see ingest/DESIGN.md). Progress comes back as "ingest" events."""
-        if cmd == "ingestInfo":
-            return self.ingest.info()
+        if cmd == "ingestInfo":  # name: "promotion" (the only cards left; the Notes tab's are retired)
+            return self.ingest.info(args.get("name") or "promotion")
         if cmd == "saveIngestState":
-            self.ingest.save_state(text(args, "state"))
+            self.ingest.save_state(text(args, "state"), args.get("name") or "promotion")
             return None
-        if cmd == "saveIngestNotes":
-            self.ingest.save_notes(text(args, "text"))
+        if cmd == "agentsInfo":  # the four agents and their prompt files (Claude Code skills)
+            return self.ingest.agents()
+        if cmd == "saveAgentPrompt":
+            self.ingest.save_agent(text(args, "id"), text(args, "text"))
             return None
         if cmd == "startIngest":
             return self.ingest.start(args.get("job"))
         if cmd == "reviseIngestCards":  # feedback: {cards: [{card, text}], accepted, rejected}
             self.ingest.revise(text(args, "runId"), args.get("feedback"))
+            return None
+        if cmd == "answerIngestQuestions":  # a promotion: answers {question id: text}
+            self.ingest.answer(text(args, "runId"), args.get("answers"))
             return None
         if cmd == "listIngestModels":  # takes a few seconds: Claude Code starts and stops
             return self.ingest.models()
@@ -267,6 +405,42 @@ class Host:
             if folder.is_dir():
                 open_folder(folder)
             return None
+        return self.dispatch_sessions(cmd, args)
+
+    def dispatch_sessions(self, cmd, args):
+        """The Ingest view's Sessions tab (see sessions/INTEGRATION.md). root: the personal wiki's folder."""
+        if cmd == "sessionsStatus":  # is the folder set up as a personal wiki, and what's in it
+            return self.sessions.status(text(args, "root"))
+        if cmd == "sessionsSetup":
+            return self.sessions.setup(text(args, "root"))
+        if cmd == "sessionsList":  # Claude Code sessions not captured yet; takes a few seconds
+            return self.sessions.list(text(args, "root"), args.get("days"), bool(args.get("all")))
+        if cmd == "sessionsIngest":  # one request to Claude: 20 seconds to a couple of minutes
+            return self.sessions.ingest(text(args, "root"), text(args, "id"), bool(args.get("force")), args.get("model"))
+        if cmd == "sessionsSkip":
+            return self.sessions.skip(text(args, "root"), text(args, "id"))
+        if cmd == "reviewList":  # the Review tab: every topic, those due first
+            return self.sessions.review_list(text(args, "root"))
+        if cmd == "reviewTopic":  # one request to Claude
+            return self.sessions.review(text(args, "root"), text(args, "topic"), args.get("model"))
+        if cmd == "suggestFolders":  # tags that could become folders; no request to Claude
+            return self.sessions.folders_suggest(text(args, "root"))
+        if cmd == "applyFolder":  # moves the topic pages into the tag's folder
+            return self.sessions.folders_apply(text(args, "root"), args.get("folder") or {})
+        if cmd == "suggestMerges":  # one request to Claude; changes nothing
+            return self.sessions.merges_suggest(text(args, "root"), args.get("model"))
+        if cmd == "applyMerge":  # folds topics, or tags, into one
+            return self.sessions.merges_apply(text(args, "root"), args.get("merge") or {})
+        # The Notes tab: notes captured into the personal wiki like sessions. root may be left out:
+        # the personal wiki picked in the app is used.
+        if cmd == "captureNotes":  # one request to Claude per note; "notesCapture" events as each finishes
+            return self.sessions.capture_notes(args.get("root"), args.get("paths"), args.get("model"), self.post_event)
+        if cmd == "notesStatus":  # each note: "new", "changed" since it was captured, or "captured"; no request
+            return self.sessions.notes_status(args.get("root"), args.get("paths"))
+        if cmd == "listConflicts":  # notes and sessions that disagree, waiting for the person
+            return self.sessions.list_conflicts(args.get("root"))
+        if cmd == "resolveConflict":  # resolution: keep_note | accept_session | dismiss
+            return self.sessions.resolve_conflict(args.get("root"), text(args, "id"), text(args, "resolution"))
         raise ValueError(f"Unknown command: {cmd}")
 
     def post_event(self, name, data):
@@ -282,7 +456,9 @@ class Host:
 
     def run(self):
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        write_atomic(INSTANCE_FILE, json.dumps({"port": self.server.server_port, "token": self.server.token}))
+        self.write_instance()
+        if not pathlist.is_chosen():
+            self.guard = start_guard(self)  # the first start: no instance.json yet
         x, y, width, height, maximized = restore_placement()
         self.bounds = (x, y, width, height) if x is not None else None
         self.window = webview.create_window(
@@ -298,10 +474,11 @@ class Host:
         events.closing += self.on_closing
         events.closed += self.on_closed
         events.shown += self.on_shown
-        # debug=True keeps what WikiApp.exe allows: F5 to reload, F12 / Inspect for developer tools.
+        # debug=True allows F12 / Inspect for developer tools (and remote debugging, when asked for).
         # icon: the window's icon from the start (Windows), so the taskbar never shows Python's.
-        webview.start(debug=True, private_mode=True, storage_path=str(web_profile_folder()),
-                      icon=str(ICON) if ICON.exists() else None)
+        # No storage_path: in private mode the web view keeps its profile in a new temporary folder
+        # each run (so a window that just closed can't hold it), and nothing goes in .wiki.
+        webview.start(debug=True, private_mode=True, icon=str(ICON) if ICON.exists() else None)
 
     def on_maximized(self):
         self.maximized, self.minimized = True, False
@@ -346,9 +523,10 @@ class Host:
 
     def on_closed(self):
         self.ingest.stop()
+        self.sessions.stop()
         try:
-            INSTANCE_FILE.unlink()
-        except OSError:
+            pathlist.path("instance").unlink()
+        except (OSError, AttributeError):
             pass
 
     def bring_to_front(self):
@@ -378,9 +556,9 @@ def restore_placement():
     except Exception:
         default = (None, None, 1280, 800, False)
     try:
-        parts = PLACEMENT_FILE.read_text(encoding="utf-8").strip().split(",")
+        parts = pathlist.path("window_placement").read_text(encoding="utf-8").strip().split(",")
         x, y, width, height = (int(p) for p in parts[:4])
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):  # AttributeError: no place chosen yet
         return default
     if width < 400 or height < 300:
         return default
@@ -394,24 +572,13 @@ def restore_placement():
     return x, y, width, height, len(parts) > 4 and parts[4] == "1"
 
 
-def web_profile_folder():
-    """A web view profile folder for this run only. The browser engine of a window that just
-    closed can hold its folder for a few seconds, and a new window can't open on a folder in
-    use; pywebview deletes this one on close (private mode). Leftovers from crashed runs go here."""
-    profiles = DATA_DIR / "webview"
-    if profiles.is_dir():
-        for old in profiles.iterdir():
-            shutil.rmtree(old, ignore_errors=True)  # one still in use stays until next time
-    return profiles / f"run-{os.getpid()}"
-
-
 def save_placement(bounds, maximized):
-    if not bounds:
+    file = pathlist.path("window_placement")
+    if not bounds or file is None:
         return
     try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        PLACEMENT_FILE.write_text(",".join(str(int(v)) for v in bounds) + ("," + ("1" if maximized else "0")), encoding="utf-8")
-    except OSError:
+        write_atomic(file, ",".join(str(int(v)) for v in bounds) + ("," + ("1" if maximized else "0")))
+    except (OSError, pathlist.PathMissing):
         pass  # not worth failing the close over
 
 
@@ -525,8 +692,10 @@ def main():
         return
     if setup_needed():
         return
-    migrate_from_windows_host()
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        appfolder.startup()  # with a place chosen: the prompt and template copies, up to date
+    except OSError:
+        pass  # a read-only or unreachable folder: the app starts, and says so when it's needed
     webview.settings["OPEN_DEVTOOLS_IN_DEBUG"] = False
     if os.environ.get("WIKIAPP_DEBUG_PORT"):
         webview.settings["REMOTE_DEBUGGING_PORT"] = int(os.environ["WIKIAPP_DEBUG_PORT"])

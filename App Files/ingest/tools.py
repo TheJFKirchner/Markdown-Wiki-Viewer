@@ -1,25 +1,28 @@
-"""The agent's two tools: read a page, and propose a change to a page.
+"""The agent's tools: read a page, propose a change to a page, and (a promotion only) ask the reviewer.
 
 A tool is an ordinary function that the agent can ask us to run. Each tool below has:
   - a name and a description, which the agent reads to know what the tool does and when to use it;
   - its inputs: the values the agent must fill in when it asks for the tool;
   - the function itself, which runs here on this computer and returns text for the agent to read.
 
-Neither tool writes anything to the wikis.
+No tool writes anything to the wikis.
   read_page     returns a page's text.
   propose_page  checks a proposed change and, if it's sound, turns it into a card that the person
                 accepts or rejects in the app. A change that fails a check goes back to the agent
                 as an error message, so it can fix the change and try again.
+  ask_reviewer  (a promotion only) sends up to five questions to the app, and ends the agent's turn.
 
 The descriptions are part of what the agent sees: keep them in step with ingest/AGENT.md.
 """
 
+import os
 import re
+from pathlib import Path
 
 import yaml
-from claude_agent_sdk import create_sdk_mcp_server, tool
+from agentlib import Tool
 
-from wikis import FRONTMATTER, INDEX_DIR, NOTE_EXT, RULES_FILE, TEMPLATES_DIR, Wikis, links_in
+from wikis import FRONTMATTER, NOTE_EXT, Wikis, links_in
 
 
 class ToolError(Exception):
@@ -29,14 +32,17 @@ class ToolError(Exception):
 class RunMemory:
     """What the tools remember during one run (and its feedback rounds)."""
 
-    def __init__(self, wikis: Wikis, run_id: str, note_ids: list[str], tell_app):
+    def __init__(self, wikis: Wikis, run_id: str, note_ids: list[str], tell_app, targets: list[str] | None = None):
         self.wikis = wikis
         self.run_id = run_id
-        self.note_ids = note_ids           # the notes being ingested
+        self.note_ids = note_ids           # the notes being ingested (for a promotion: the personal pages)
+        self.targets = targets or None     # the only wikis changes may be proposed in (a promotion: the team wikis)
         self.tell_app = tell_app           # sends a progress line to the app
         self.pages_read: dict[str, str] = {}   # page id -> its text when the agent read it
         self.cards: dict[str, dict] = {}       # page id (or "alias:new/path.md") -> the card for it
         self.decided: dict[str, str] = {}      # card id -> "accepted" or "rejected" (feedback rounds)
+        self.questions: list[dict] = []        # what the agent asked the reviewer (a promotion only)
+        self.asked = False                     # it has asked: one round of questions per run
         self.read_count = 0
 
 
@@ -137,6 +143,8 @@ def propose_page(memory: RunMemory, wiki: str, summary: str, from_notes: list, p
     wiki = str(wiki or "").strip()
     if wiki not in memory.wikis.aliases:
         raise ToolError(f'Unknown wiki "{wiki}". Wikis: {", ".join(memory.wikis.aliases)}.')
+    if memory.targets and wiki not in memory.targets:
+        raise ToolError("Changes may only be proposed in: " + ", ".join(memory.targets) + f'. "{wiki}" is where the pages came from.')
     summary = str(summary or "").strip()
     if not summary:
         raise ToolError("Give a one-sentence summary for the reviewer.")
@@ -211,8 +219,7 @@ def make_new_page(memory: RunMemory, wiki: str, new_path: str, content: str, tem
     if any(not p or p in (".", "..") or p.startswith(".") or BAD_PATH_CHARS.search(p) for p in parts):
         raise ToolError(f'"{new_path}" is not a usable path inside the wiki.')
     lower = path.lower()
-    notes_dir = memory.wikis.notes_dir.lower() + "/"
-    if lower.startswith(notes_dir) or lower.startswith(TEMPLATES_DIR.lower() + "/") or lower == RULES_FILE or lower.startswith(INDEX_DIR + "/"):
+    if is_reserved(memory.wikis, wiki, path):
         raise ToolError("New pages can't go in the notes folder, Templates, or be wiki_rules.md.")
     if any(p.wiki == wiki and p.path.lower() == lower for p in memory.wikis.pages.values()):
         raise ToolError(f"{wiki}:{path} already exists. Read it and propose edits instead.")
@@ -235,6 +242,26 @@ def make_new_page(memory: RunMemory, wiki: str, new_path: str, content: str, tem
     return change
 
 
+def is_reserved(wikis: Wikis, wiki: str, path: str) -> bool:
+    """True when a new page at `path` (inside `wiki`) would land where pages don't go: the wiki's
+    rules file or templates folder (where the path list says they are), or anywhere the wiki scan
+    wouldn't count as a page (the notes folder, Templates/). Dot-folders, such as the .wiki folder
+    older versions wrote, are already refused by the path check."""
+    file = wikis.roots[wiki] / path
+    rules = wikis.rules_files.get(wiki)
+    if rules is not None and _key(file) == _key(rules):
+        return True
+    templates = wikis.templates_dirs.get(wiki)
+    if templates is not None and _key(file).startswith(_key(templates).rstrip("\\/") + os.sep):
+        return True
+    return wikis._kind(path, wiki) != "page"
+
+
+def _key(path: Path) -> str:
+    """A path for comparing: absolute, one kind of slash, and case-blind (as on Windows and macOS)."""
+    return os.path.normcase(os.path.abspath(path)).replace("/", os.sep).lower()
+
+
 def check_frontmatter(text: str) -> None:
     if not text.startswith("---\n"):
         return
@@ -249,31 +276,93 @@ def check_frontmatter(text: str) -> None:
         raise ToolError('The frontmatter must be "key: value" lines.')
 
 
-# ---- Handing the tools to Claude Code -----------------------------------------------------------
-# Plumbing: Claude Code takes tools as a small in-process "MCP server". It names them
-# mcp__<server>__<tool>, so the agent sees mcp__wiki__read_page and mcp__wiki__propose_page.
+# ---- Tool 3: ask_reviewer (a promotion only) ---------------------------------------------------
+# A personal page says what happened on one piece of work. Where a point belongs in the team
+# wiki, and whether it holds in general, is often something only the person knows. Rather than
+# guess, the agent may ask once, before it proposes anything. The run then stops; the app shows
+# the questions, and the answers come back as the next message of the same conversation.
+
+MAX_QUESTIONS = 5
+
+ASK_REVIEWER = {
+    "name": "ask_reviewer",
+    "description": (
+        "Ask the reviewer up to 5 questions before proposing, when where a point belongs in the team wiki (or "
+        "whether it holds in general) is unclear and the answer changes what you would write. Each question has "
+        "`about` (the point it concerns, in a few words), `question` (one plain question), and for a question of "
+        "where something goes, `options`: the candidate destinations as page ids or new-page paths. You can call "
+        "this once per run. After calling it, stop and wait for the answers."
+    ),
+    "inputs": {
+        "type": "object",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "about": {"type": "string"},
+                        "question": {"type": "string"},
+                        "options": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["about", "question"],
+                },
+            },
+        },
+        "required": ["questions"],
+        "additionalProperties": False,
+    },
+}
+
+
+def ask_reviewer(memory: RunMemory, questions: list) -> str:
+    if memory.asked:
+        raise ToolError("You have already asked your questions in this run. Propose with what you know, and leave out what is still unclear.")
+    asked = []
+    for q in questions if isinstance(questions, list) else []:
+        if not isinstance(q, dict) or not str(q.get("question") or "").strip():
+            continue
+        options = [str(o).strip() for o in q.get("options") or [] if str(o).strip()][:6]
+        asked.append({"id": f"q{len(asked) + 1}", "about": str(q.get("about") or "").strip(),
+                      "question": str(q["question"]).strip(), "options": options})
+    if not asked:
+        raise ToolError("Give at least one question, each with `about` and `question`.")
+    if len(asked) > MAX_QUESTIONS:
+        raise ToolError(f"Ask at most {MAX_QUESTIONS} questions: keep the ones whose answer changes what you would write.")
+    memory.questions, memory.asked = asked, True
+    memory.tell_app({"type": "questions", "questions": asked})
+    return (f"{len(asked)} question{'s' if len(asked) != 1 else ''} sent to the reviewer. Stop now: reply with just \"Waiting.\" "
+            "and call no more tools. The answers arrive as the next message.")
+
 
 TOOLS = [(READ_PAGE, read_page), (PROPOSE_PAGE, propose_page)]
-TOOL_NAMES = [f"mcp__wiki__{spec['name']}" for spec, _ in TOOLS]
 
 
-def tools_for_claude(memory: RunMemory):
-    def wrap(spec: dict, function):
+def tools_of(memory: RunMemory) -> list:
+    """The run's tools: the two every run has, and ask_reviewer in a promotion."""
+    return TOOLS + ([(ASK_REVIEWER, ask_reviewer)] if memory.targets else [])
+
+
+# ---- Handing the tools to the agent ---------------------------------------------------------------
+# Plumbing: agentlib takes each tool as a Tool (name, description, inputs, the function to run) and
+# serves them to the model itself. Claude sees them as mcp__<server>__<tool>; agent.py names the
+# server "wiki", so it sees mcp__wiki__read_page and so on. A function that raises ToolError sends
+# its message back to the agent as an error result, which agentlib writes as
+# "error: ToolError: <message>"; the turn goes on, so the agent can fix its request.
+
+def tools_for_agent(memory: RunMemory) -> list[Tool]:
+    def wrap(spec: dict, function) -> Tool:
         known = spec["inputs"]["properties"]
 
-        @tool(spec["name"], spec["description"], spec["inputs"])
-        async def run(inputs: dict) -> dict:
+        def run(**inputs):
             try:
-                text, failed = function(memory, **{k: v for k, v in inputs.items() if k in known}), False
-            except ToolError as err:
-                text, failed = str(err), True
+                return function(memory, **{k: v for k, v in inputs.items() if k in known})
             except TypeError as err:  # a required input was left out
-                text, failed = f"Missing input: {err}", True
-            result = {"content": [{"type": "text", "text": text}]}
-            if failed:
-                result["is_error"] = True
-            return result
+                raise ToolError(f"Missing input: {err}") from None
 
-        return run
+        # ask_reviewer ends the agent's turn as soon as it succeeds: the questions go to the app,
+        # and the answers come back as the next message of the same conversation.
+        return Tool(name=spec["name"], description=spec["description"], schema=spec["inputs"], handler=run,
+                    ends_turn=spec["name"] == ASK_REVIEWER["name"])
 
-    return create_sdk_mcp_server(name="wiki", version="1.0.0", tools=[wrap(spec, function) for spec, function in TOOLS])
+    return [wrap(spec, function) for spec, function in tools_of(memory)]

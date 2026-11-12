@@ -1,9 +1,9 @@
 // Keeps the app's settings (open folders, signature, colors, last view...) in a file as well as
 // in the browser storage. Browser storage alone can be lost: cleared site data, a closed window
-// before it was written to disk, a different WebView2 profile. The host serves the file to the
-// page as settings.js (loaded just before this script) and saves it when asked. It lives in
-// ~/.wikiapp/settings.json for host/wikiapp.py, which starts each run with empty browser storage,
-// and in %LOCALAPPDATA%\WikiApp\settings.json for WikiApp.exe.
+// before it was written to disk, a different web view profile. The host (host/wikiapp.py) serves
+// the file to the page as settings.js (loaded just before this script) and saves it when asked.
+// It lives in ~/.wikiapp/settings.json. The host starts each run with empty browser storage, so
+// the file is what counts.
 //
 // Every save bumps "__rev". On start, whichever copy has the higher revision wins, so neither a
 // lost browser storage nor a save that didn't reach the file loses anything.
@@ -12,11 +12,9 @@
 
 (function () {
   var REV = '__rev';
-  var python = window.__wikiappHost === 'python';
-  var webview = !python && window.chrome && window.chrome.webview;
+  var hosted = window.__wikiappHost === 'python'; // set by the host's settings.js
   // The same message bridge.js sends, before bridge.js has loaded.
   function post(msg) {
-    if (webview) return webview.postMessage(msg);
     var api = window.pywebview && window.pywebview.api;
     if (api && api.call) api.call(msg);
     else window.addEventListener('pywebviewready', function () { window.pywebview.api.call(msg); }, { once: true });
@@ -45,7 +43,7 @@
   var timer = 0;
   function save() {
     timer = 0;
-    if (!webview && !python) return;
+    if (!hosted) return;
     setItem.call(storage, REV, String((Number(storage.getItem(REV)) || 0) + 1));
     var all = {};
     for (var i = 0; i < storage.length; i++) {

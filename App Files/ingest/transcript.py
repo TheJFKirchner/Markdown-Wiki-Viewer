@@ -1,13 +1,11 @@
-"""The run's record, transcript.json: each request to Claude with its tokens, cost and the tools
-it called, the cards, the totals, and any feedback rounds. The app's Past runs list shows it.
-Written when the run ends (also when it fails), and extended by each feedback round.
+"""The run's record, transcript.json: each step Claude took with the tools it called and what it
+said, the cards, the totals (tokens and cost), and any feedback rounds. The app's Past runs list
+shows it. Written when the run ends (also when it fails), and extended by each feedback round.
 """
 
 import json
 from datetime import datetime
 from pathlib import Path
-
-from costs import priced, tokens_of
 
 
 class Transcript:
@@ -27,10 +25,10 @@ class Transcript:
             "cards": [],
             "totals": None,
         }
-        self.by_message = {}
         self.tool_calls = {}
-        self.streaming = None  # id of the request whose answer is streaming in
-        self.round = 0         # 0: the run itself; 1, 2...: feedback rounds
+        self.step = None            # the step being filled in
+        self.step_answered = False  # our tools have answered it: what Claude does next is a new request
+        self.round = 0              # 0: the run itself; 1, 2...: feedback rounds
 
     @classmethod
     def load(cls, job: dict, run_folder: Path, prices: dict) -> "Transcript":
@@ -48,74 +46,59 @@ class Transcript:
             "notes": {note_id: approx(text) for note_id, text in notes.items()},
         }
 
-    # ---- What comes back from Claude, request by request ------------------------------------
+    # ---- What comes back from Claude, step by step ------------------------------------------
+    # The engine reports what Claude said and which tools it called, and the tokens and cost once
+    # per message (the run, or one round), not per request. A step here is one request as far as
+    # it can be seen: it ends when our tools have answered, and Claude's next words or tool calls
+    # start the next one. Steps carry no tokens of their own; the turn's are in the totals.
 
-    def step_for(self, message_id: str | None) -> dict:
-        key = message_id or f"request-{len(self.data['steps']) + 1}"
-        if key not in self.by_message:
-            step = {"n": len(self.data["steps"]) + 1, "round": self.round, "tokens": None, "cost": None, "text": [], "tools": []}
-            self.data["steps"].append(step)
-            self.by_message[key] = step
-        return self.by_message[key]
+    def current_step(self) -> dict:
+        if self.step is None or self.step_answered:
+            self.step = {"n": len(self.data["steps"]) + 1, "round": self.round, "tokens": None, "cost": None,
+                         "text": [], "tools": []}
+            self.data["steps"].append(self.step)
+            self.step_answered = False
+        return self.step
 
-    def stream_event(self, event: dict) -> None:
-        """A request's usage arrives in two parts: input and cache tokens when its answer starts,
-        the final output count when it ends (assistant messages only carry the first)."""
-        if event.get("type") == "message_start":
-            message = event.get("message") or {}
-            self.streaming = message.get("id")
-            if message.get("usage"):
-                self.set_tokens(self.step_for(self.streaming), message["usage"])
-        elif event.get("type") == "message_delta" and self.streaming and event.get("usage"):
-            step = self.step_for(self.streaming)
-            step["tokens"] = step["tokens"] or tokens_of(None)
-            step["tokens"]["output"] = int(event["usage"].get("output_tokens") or step["tokens"]["output"])
-            step["cost"] = round(priced(step["tokens"], self.prices), 5)
-            step["final"] = True
+    def claude_said(self, text: str) -> None:
+        """A short remark from Claude."""
+        if text.strip():
+            self.current_step()["text"].append(text.strip()[:600])
 
-    def set_tokens(self, step: dict, usage: dict) -> None:
-        step["tokens"] = tokens_of(usage)
-        step["cost"] = round(priced(step["tokens"], self.prices), 5)
+    def tool_called(self, call_id: str, name: str, inputs: dict) -> None:
+        """A tool Claude asked for (by its short name: read_page, propose_page, ask_reviewer)."""
+        inputs = inputs or {}
+        call = {"tool": name}
+        if name == "read_page":
+            call["asked"] = str(inputs.get("page", ""))
+        elif name == "ask_reviewer":
+            call["target"] = "questions for the reviewer"   # the run window shows "Proposed <target>"
+            call["summary"] = "; ".join(str(q.get("question") or "") for q in inputs.get("questions") or [] if isinstance(q, dict))[:600]
+        elif name != "propose_page":
+            call["target"] = name   # a tool the agent doesn't have (it is denied: see the call's error)
+        else:
+            call["target"] = inputs.get("page") or f"{inputs.get('wiki', '')}:{inputs.get('new_path', '')}"
+            call["summary"] = inputs.get("summary", "")
+            if inputs.get("edits"):
+                call["edits"] = len(inputs["edits"])
+            if inputs.get("template"):
+                call["template"] = inputs["template"]
+        self.current_step()["tools"].append(call)
+        self.tool_calls[call_id] = call
 
-    def claude_said(self, message, TextBlock, ToolUseBlock) -> None:
-        """One of Claude's answers: its text, and the tools it asked for."""
-        step = self.step_for(message.message_id)
-        if message.usage and not step.get("final"):
-            self.set_tokens(step, message.usage)
-        for block in message.content:
-            if isinstance(block, ToolUseBlock):
-                name = block.name.split("__")[-1]
-                call = {"tool": name}
-                if name == "read_page":
-                    call["asked"] = str(block.input.get("page", ""))
-                else:
-                    call["target"] = block.input.get("page") or f"{block.input.get('wiki', '')}:{block.input.get('new_path', '')}"
-                    call["summary"] = block.input.get("summary", "")
-                    if block.input.get("edits"):
-                        call["edits"] = len(block.input["edits"])
-                    if block.input.get("template"):
-                        call["template"] = block.input["template"]
-                step["tools"].append(call)
-                self.tool_calls[block.id] = call
-            elif isinstance(block, TextBlock) and block.text.strip():
-                step["text"].append(block.text.strip()[:600])
-
-    def tools_answered(self, message, ToolResultBlock) -> None:
-        """What our tools sent back to Claude."""
-        if not isinstance(message.content, list):
+    def tool_answered(self, call_id: str, text: str, is_error: bool) -> None:
+        """What our tool sent back to Claude."""
+        if self.step is not None:
+            self.step_answered = True
+        call = self.tool_calls.get(call_id)
+        if call is None:
             return
-        for block in message.content:
-            if not isinstance(block, ToolResultBlock) or block.tool_use_id not in self.tool_calls:
-                continue
-            content = block.content
-            text = content if isinstance(content, str) else "".join(
-                part.get("text", "") for part in content or [] if isinstance(part, dict))
-            call = self.tool_calls[block.tool_use_id]
-            call["resultTokens"] = len(text) // 4  # approximate: what the tool sent back
-            if block.is_error:
-                call["error"] = text[:300]
-            elif call["tool"] == "read_page" and text.startswith("id: "):
-                call["page"] = text[4:text.find("\n")] if "\n" in text else text[4:]
+        text = text or ""
+        call["resultTokens"] = len(text) // 4  # approximate: what the tool sent back
+        if is_error:
+            call["error"] = text[:300]
+        elif call["tool"] == "read_page" and text.startswith("id: "):
+            call["page"] = text[4:text.find("\n")] if "\n" in text else text[4:]
 
     # ---- Endings ----------------------------------------------------------------------------
 

@@ -155,6 +155,7 @@ export function buildVault(folders, { notesDir } = {}) {
         description: typeof properties?.description === 'string' ? properties.description : '',
         duplicate: false,          // another folder has a note with the same name
         inbox: isNotesPath(file.path, notesDir), // a quick note in the notes folder (see notes.js)
+        session: properties?.type === 'session', // a captured session's note (Ingest, Sessions tab)
         template,
         tasks: template ? [] : parseTasks(content),
         hasTasksSection: tasksSectionEnd(content) >= 0,
@@ -301,6 +302,7 @@ export function graphData(vault) {
       folder: note.folder,
       ghost: false,
       inbox: note.inbox,
+      session: note.session,
       degree: 0,
       tags: note.tags,
       description: note.description,

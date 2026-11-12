@@ -1,12 +1,12 @@
-"""Ingest runs, for the Python host: one at a time, ingest/run.py in this app's Python with no
-window. Each line it prints (a JSON object) goes to the page as an "ingest" event, and an
-"ingestExit" event follows when it ends. A port of the Ingest parts of WikiApp.cs.
+"""Promotion runs, for the host: one at a time, ingest/run.py in this app's Python with no
+window (the agent itself runs through agentlib; see ingest/agent.py). Each line it prints (a
+JSON object) goes to the page as an "ingest" event, and an "ingestExit" event follows when it ends.
 
-Files: the user's data in <data>/ingest (cards waiting for review, notes for the agent) and one
-folder per run in <data>/ingest-runs/<run id>.
+Files (where the path list says, see pathlist.py): the cards waiting for review
+("pending_promotion") and one folder per run in "run_history"/<run id>, all in the app's private
+folder by default.
 """
 
-import importlib.util
 import json
 import os
 import signal
@@ -16,11 +16,16 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+import appfolder
+import pathlist
+
 APP_DIR = Path(__file__).resolve().parent.parent
 CODE_DIR = APP_DIR / "ingest"
+sys.path.insert(0, str(APP_DIR / "agents"))
+import agentfiles  # noqa: E402  (the four agents' prompt files)
+
 RUN_SCRIPT = CODE_DIR / "run.py"
 MODELS_SCRIPT = CODE_DIR / "models.py"
-SHIPPED_PROMPT = CODE_DIR / "agent-prompt.md"
 SETUP_SCRIPT = APP_DIR / "setup.py"
 
 
@@ -33,46 +38,69 @@ def console_python():
 
 
 class IngestRuns:
-    def __init__(self, data_dir, post_event):
-        self.data_dir = Path(data_dir) / "ingest"
-        self.runs_dir = Path(data_dir) / "ingest-runs"
-        self.state_file = self.data_dir / "pending.json"
-        self.notes_file = self.data_dir / "user-notes.md"
+    # Cards waiting for an answer: the Promotion tab's file. (Runs are Promotion runs only; notes
+    # reach the personal wiki through the Sessions tab.)
+    STATE_ENTRIES = {"promotion": "pending_promotion"}
+
+    def __init__(self, post_event):
         self._post = post_event
         self._process = None
         self._run_id = None
         self._lock = threading.Lock()
 
+    @property
+    def runs_dir(self):
+        """The past runs' folder (None when no private folder is chosen yet). Asked each time, so
+        moving the private folder or pointing the entry elsewhere takes effect at once."""
+        return pathlist.path("run_history")
+
     # ---- What the Ingest view asks for ----
 
-    def info(self):
+    def info(self, name="promotion"):
         running = self.running()
+        ready = pathlist.agentlib_installed()
+        folder = pathlist.app_folder()
         return {
-            "ready": importlib.util.find_spec("claude_agent_sdk") is not None,
+            "ready": ready,
+            "message": "" if ready else appfolder.agentlib_status()["message"],
             "running": running,
             "runId": self._run_id if running else None,
-            "prompt": _read_or_none(SHIPPED_PROMPT),
-            "userNotes": _read_or_none(self.notes_file) or "",
-            "state": _read_or_none(self.state_file),
-            "dataDir": str(self.data_dir),
+            "state": _read_or_none(self._state_file(name)),
+            "dataDir": str(folder) if folder else "",
         }
 
-    def save_state(self, text):
-        write_atomic(self.state_file, text)
+    def _state_file(self, name):
+        if name not in self.STATE_ENTRIES:
+            raise ValueError(f'Bad state name: "{name}" (only "promotion" has cards).')
+        return pathlist.path(self.STATE_ENTRIES[name])
 
-    def save_notes(self, text):
-        write_atomic(self.notes_file, text)
+    def save_state(self, text, name="promotion"):
+        file = self._state_file(name)
+        if file is None:
+            raise pathlist.PathMissing("Choose where WikiApp keeps its private folder first.")
+        write_atomic(file, text)
+
+    def agents(self):
+        """The four agents with their prompt files, for the Agents window."""
+        return agentfiles.info()
+
+    def save_agent(self, agent_id, text):
+        agentfiles.save(agent_id, text)
 
     def run_dir(self, run_id):
         if not run_id or not all(c.isalnum() or c in "-_" for c in run_id):
             raise ValueError("Bad run id.")
-        return self.runs_dir / run_id
+        runs = self.runs_dir
+        if runs is None:
+            raise pathlist.PathMissing("Choose where WikiApp keeps its private folder first.")
+        return runs / run_id
 
     def list_runs(self, limit=30):
         """Past runs, newest first: [{ runId, transcript (the text of transcript.json, or None) }]."""
-        if not self.runs_dir.is_dir():
+        runs = self.runs_dir
+        if runs is None or not runs.is_dir():
             return []
-        folders = sorted((p for p in self.runs_dir.iterdir() if p.is_dir()), key=lambda p: p.name.lower(), reverse=True)
+        folders = sorted((p for p in runs.iterdir() if p.is_dir()), key=lambda p: p.name.lower(), reverse=True)
         return [{"runId": p.name, "transcript": _read_or_none(p / "transcript.json")} for p in folders[:limit]]
 
     # ---- Runs ----
@@ -88,16 +116,16 @@ class IngestRuns:
                 raise RuntimeError("An ingest run is already going.")
             run_id = datetime.now().strftime("%Y-%m-%d_%H%M%S")
             folder = self.run_dir(run_id)
-            folder.mkdir(parents=True, exist_ok=True)
+            pathlist.ensure_parent(folder)  # the runs folder: made only inside the private folder
+            folder.mkdir(exist_ok=True)
             job["runId"] = run_id
-            job["userNotes"] = _read_or_none(self.notes_file) or ""
             job_file = folder / "job.json"
             job_file.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
             self._launch(run_id, [str(job_file)])
             return run_id
 
     def revise(self, run_id, feedback):
-        """A feedback round: run.py resumes the run's Claude session with the reviewer's feedback
+        """A feedback round: run.py continues the run's conversation with the reviewer's feedback
         ({"cards": [{"card", "text"}], "accepted": [ids], "rejected": [ids]})."""
         if not isinstance(feedback, dict) or not feedback.get("cards"):
             raise ValueError("Missing argument: feedback")
@@ -113,8 +141,25 @@ class IngestRuns:
             feedback_file.write_text(json.dumps(feedback, ensure_ascii=False), encoding="utf-8")
             self._launch(run_id, [str(job_file), "--feedback", str(feedback_file)])
 
+    def answer(self, run_id, answers):
+        """A promotion's questions, answered: run.py resumes the run's Claude session with the
+        answers ({question id: text, "" for one that was skipped}), and the agent proposes."""
+        if not isinstance(answers, dict):
+            raise ValueError("Missing argument: answers")
+        with self._lock:
+            if self.running():
+                raise RuntimeError("Claude is still working. Wait for it to finish.")
+            folder = self.run_dir(run_id)
+            job_file = folder / "job.json"
+            if not job_file.exists() or not (folder / "session.json").exists():
+                raise RuntimeError("This run's folder is gone, so Claude can't continue it.")
+            answers_file = folder / "answers.json"
+            answers_file.write_text(json.dumps(answers, ensure_ascii=False), encoding="utf-8")
+            self._launch(run_id, [str(job_file), "--answers", str(answers_file)])
+
     def models(self):
-        """The models Claude Code offers, from ingest/models.py (a JSON list; no request to Claude)."""
+        """The models the engine offers (agentlib's list_models, through ingest/models.py, in this
+        app's Python): a JSON list of {id, name, description}. No request is made to the model."""
         options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
         try:
             done = subprocess.run([str(console_python()), "-X", "utf8", str(MODELS_SCRIPT)], cwd=str(CODE_DIR),
@@ -191,19 +236,15 @@ class IngestRuns:
 
 def write_atomic(path, text):
     """Written to a temporary file first, so a crash mid-write never leaves half a file. Each
-    write has its own temporary file: page calls can arrive on several threads at once."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f"{path.name}.{os.getpid()}-{threading.get_ident()}.tmp")
-    temp.write_text(text, encoding="utf-8")
-    with _replace_lock:  # Windows refuses two replaces of one file at the same moment
-        os.replace(temp, path)
-
-
-_replace_lock = threading.Lock()
+    write has its own temporary file: page calls can arrive on several threads at once. A missing
+    folder is made only inside the app's private folder (pathlist.ensure_parent)."""
+    pathlist.ensure_parent(path)
+    pathlist.write_text_atomic(path, text)
 
 
 def _read_or_none(path):
+    if path is None:
+        return None
     try:
         return Path(path).read_text(encoding="utf-8-sig")
     except FileNotFoundError:

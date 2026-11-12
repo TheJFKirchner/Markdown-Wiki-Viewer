@@ -21,7 +21,14 @@ import { createNotesPanel } from './notespanel.js';
 import { createNotesView } from './notesview.js';
 import { createIngestView } from './ingestview.js';
 import { createIngestDialogs } from './ingestdialogs.js';
-import { TEMPLATES_DIR, NOTE_TEMPLATES_DIR, PAGE_TEMPLATES_DIR, PAGE_TEMPLATE_STARTER, SEED_TEMPLATES, DEFAULT_NOTES_DIR, cleanNotesDir, templatesIn, fillTemplate, newNotePath, noteInfo } from './notes.js';
+import { createSessionsView } from './sessionsview.js';
+import { createReviewView } from './reviewview.js';
+import { createCaptureView } from './capturenotes.js';
+import { createSettingsView } from './settingsview.js';
+import { showSetup, showLeftovers } from './setup.js';
+import { refreshAi } from './ai.js';
+import { loadEngineModels } from './modelmenu.js';
+import { NOTE_TEMPLATES_DIR, PAGE_TEMPLATES_DIR, DEFAULT_NOTES_DIR, cleanNotesDir, setDefaultTemplates, templatesIn, fillTemplate, newNotePath, noteInfo } from './notes.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -216,7 +223,67 @@ const notesView = createNotesView($('notes-view'), {
   onSaveFailed: (note) => toast(`Your last edits to ${note.name} couldn't be saved. They're kept in the Notes view: open it to keep them or load the latest version.`),
 });
 
-const ingestView = createIngestView($('ingest-view'), {
+// The Ingest view has four tabs, one per agent:
+//   Notes      the note taker: wrapped quick notes -> changes to wiki pages, answered card by card
+//   Sessions   the executive assistant: Claude Code sessions -> session notes filed under topics, written directly
+//   Review     the wiki reviewer: rewrites a topic page's summary, suggests merges; folders from shared tags
+//   Promotion  the team wiki manager: personal pages -> changes to the team wiki, answered card by card
+const INGEST_TABS = ['notes', 'sessions', 'review', 'promotion'];
+function updateIngestCounts() {
+  $('ingest-badge').textContent = ingestView.badge() || '';
+  $('ingest-notes-count').textContent = ingestView.badge() || '';
+  $('ingest-sessions-count').textContent = sessionsView.count() || '';
+  $('ingest-review-count').textContent = reviewView.count() || '';
+  $('ingest-promotion-count').textContent = promotionView.badge() || '';
+}
+
+function showIngestTab(tab) {
+  tab = INGEST_TABS.includes(tab) ? tab : 'notes';
+  store('ingestTab', tab);
+  for (const name of INGEST_TABS) $(`ingest-${name}`).hidden = name !== tab;
+  for (const button of document.querySelectorAll('.ingest-tab')) {
+    button.classList.toggle('active', button.dataset.tab === tab);
+    button.setAttribute('aria-selected', String(button.dataset.tab === tab));
+  }
+  if (state.view !== 'ingest') return;
+  if (tab === 'sessions') sessionsView.shown();
+  if (tab === 'review') reviewView.shown();
+}
+$('ingest-help').addEventListener('click', () => ingestDialogs.openHelp());
+$('ingest-agents').addEventListener('click', () => ingestDialogs.openPrompt());
+document.querySelector('.ingest-tabs').addEventListener('click', (e) => {
+  const button = e.target.closest('.ingest-tab');
+  if (button) showIngestTab(button.dataset.tab);
+});
+
+const sessionsView = createSessionsView($('ingest-sessions'), {
+  call,
+  getFolders: () => workspace.list(),
+  findFolder: (alias) => workspace.find(alias),
+  reload: async (alias) => {
+    const folder = workspace.find(alias);
+    if (folder && (await scanFolder(folder))) rebuild();
+  },
+  openPage: (id) => openFile(id, undefined, { page: true }),
+  toast: (message) => toast(message),
+  onChange: () => updateIngestCounts(),
+  onCaptured: () => reviewView.refresh(),
+});
+
+const reviewView = createReviewView($('ingest-review'), {
+  call,
+  getWiki: () => sessionsView.wiki(),
+  reload: async (alias) => {
+    const folder = workspace.find(alias);
+    if (folder && (await scanFolder(folder))) rebuild();
+  },
+  openPage: (id) => openFile(id, undefined, { page: true }),
+  toast: (message) => toast(message),
+  onChange: () => updateIngestCounts(),
+});
+
+// What the two card tabs share. Promotion is the same screen (ingestview.js) with another list.
+const cardViewDeps = {
   call,
   on,
   getVault: () => state.vault,
@@ -230,45 +297,66 @@ const ingestView = createIngestView($('ingest-view'), {
   render: (text, folder) => viewer.renderMarkdown(text, folder),
   openPage: (id) => openFile(id, undefined, { page: true }),
   toast: (message) => toast(message),
-  onChange: () => ($('ingest-badge').textContent = ingestView.badge() || ''),
+  onChange: () => updateIngestCounts(),
   onHelp: () => ingestDialogs.openHelp(),
   onEditPrompt: () => ingestDialogs.openPrompt(),
   onShowRun: (transcript, when) => ingestDialogs.openRun(transcript, when),
+};
+const promotionView = createIngestView($('ingest-promotion'), {
+  ...cardViewDeps,
+  mode: 'promotion',
+  getSourceWiki: () => sessionsView.wiki(),
+});
+
+// The Notes tab: capture wrapped notes into the personal wiki (capturenotes.js).
+const ingestView = createCaptureView($('ingest-notes'), {
+  call,
+  on,
+  findFolder: (alias) => workspace.find(alias),
+  getPersonal: () => sessionsView.wiki(),
+  reload: async (alias) => {
+    const folder = workspace.find(alias);
+    if (folder && (await scanFolder(folder))) rebuild();
+  },
+  openPage: (id) => openFile(id, undefined, { page: true }),
+  toast: (message) => toast(message),
+  onChange: () => updateIngestCounts(),
+  onCaptured: () => reviewView.refresh(),
 });
 const ingestDialogs = createIngestDialogs($('ingest-dialog'), {
-  getInfo: () => ingestView.info(),
-  saveNotes: async (text) => {
+  // The four agents and their prompt files (Claude Code skills; see agents/agentfiles.py).
+  getAgents: () => call('agentsInfo'),
+  saveAgent: async (id, text) => {
     try {
-      await call('saveIngestNotes', { text });
-      ingestView.setInfo({ userNotes: text });
+      await call('saveAgentPrompt', { id, text });
       return true;
     } catch (err) {
       return err.message;
     }
   },
-  getWikis: () =>
-    workspace.list().map((f) => {
-      const rules = [...(state.vault?.notes.values() || [])].find((n) => n.folder === f.alias && n.path.toLowerCase() === RULES_FILE);
-      return { alias: f.alias, color: f.color, text: rules ? rules.content.replace(/\r\n/g, '\n') : null };
-    }),
-  // Writes <wiki>/wiki_rules.md: replaces the file if it's unchanged since the window opened it
-  // (`opened` is the text the window loaded, or last saved).
+  // Each wiki's rules file, read through the path list (wiki.<alias>.rules), and the starter for one that
+  // doesn't exist yet (template.rules-starter, with {{alias}} filled in).
+  getWikis: async () => {
+    const starter = await readSlot('template.rules-starter');
+    return Promise.all(workspace.list().map(async (f) => {
+      let file = { text: null, path: '' };
+      try {
+        file = await call('readPathFile', { name: `wiki.${f.alias}.rules` });
+      } catch { /* no rules file known for it */ }
+      return { alias: f.alias, color: f.color, path: file.path, text: file.text, starter: fillAlias(starter, f.alias) };
+    }));
+  },
+  // Writes the wiki's rules file through the path list; refused if it changed since the window opened it.
   saveRules: async (alias, text, opened) => {
     const folder = workspace.find(alias);
     if (!folder) return 'that folder is no longer in the workspace.';
-    const rules = [...state.vault.notes.values()].find((n) => n.folder === alias && n.path.toLowerCase() === RULES_FILE);
-    const lines = text.endsWith('\n') ? text.split('\n') : [...text.split('\n'), ''];
-    let ok = true;
-    let message = '';
     try {
-      if (rules) await call('editLines', { root: folder.root, path: rules.path, start: 0, expect: (opened ?? rules.content).split(/\r?\n/), replace: lines });
-      else await call('createNote', { root: folder.root, path: RULES_FILE, lines });
+      await call('writePathFile', { name: `wiki.${alias}.rules`, text, ...(opened != null ? { expect: opened } : {}) });
     } catch (err) {
-      ok = false;
-      message = /changed on disk/.test(err.message) ? 'the file changed outside the app. Close and reopen this window to see it.' : err.message;
+      return /changed on disk/.test(err.message) ? 'the file changed outside the app. Close and reopen this window to see it.' : err.message;
     }
     if (await scanFolder(folder)) rebuild();
-    return ok || message;
+    return true;
   },
   // Page templates for Ingest's new pages, in every wiki: [{ id, alias, name, path, description }].
   getPageTemplates: () =>
@@ -285,7 +373,8 @@ const ingestDialogs = createIngestDialogs($('ingest-dialog'), {
     const path = `${PAGE_TEMPLATES_DIR}/${clean}.md`;
     const id = `${alias}:${path}`;
     if (!state.vault.notes.has(id)) {
-      const ok = await writeAndReload(folder, () => call('createNote', { root: folder.root, path, lines: PAGE_TEMPLATE_STARTER.split('\n') }));
+      const starter = await readSlot('template.page-starter');
+      const ok = await writeAndReload(folder, () => call('createNote', { root: folder.root, path, lines: starter.split('\n') }));
       if (!ok) return;
       toast(`Made the ${clean} page template in ${alias} / ${path}. Describe when to use it, then lay out the page.`);
     }
@@ -294,6 +383,37 @@ const ingestDialogs = createIngestDialogs($('ingest-dialog'), {
   getLogRaw: () => load('ingestLogRaw') === 'true',
   setLogRaw: (on) => store('ingestLogRaw', on),
   openRunFolder: (runId) => call('openIngestRun', { runId }).catch((err) => toast(err.message)),
+});
+
+// The Settings screen: every path WikiApp uses, and the AI engine. Reached from the gear at the bottom of the rail.
+const settingsView = createSettingsView($('settings-view'), {
+  getFolders: () => workspace.list(),
+  getPersonal: () => sessionsView.wiki(),
+  setPersonal: (alias) => {
+    store('sessionsWiki', alias);
+    ingestView.redraw();
+  },
+  toast: (message) => toast(message),
+  // A file inside a connected wiki opens in the app's own editor; anything else is the caller's to show.
+  openInEditor: async (path) => {
+    const norm = (p) => p.replace(/\\/g, '/').replace(/\/+$/, '');
+    const full = norm(path).toLowerCase();
+    for (const f of workspace.list()) {
+      const root = norm(f.root).toLowerCase();
+      if (!full.startsWith(`${root}/`)) continue;
+      const id = `${f.alias}:${norm(path).slice(root.length + 1)}`;
+      if (state.vault?.notes.has(id)) {
+        startEditing(id);
+        return true;
+      }
+    }
+    return false;
+  },
+  onChanged: async (names) => {
+    await loadPaths();
+    if (state.vault) rebuild();
+    if (names.some((n) => /^wiki\./.test(n))) for (const f of workspace.list()) if (await scanFolder(f)) rebuild();
+  },
 });
 
 $('add-folder').addEventListener('click', () => dialog.open());
@@ -563,7 +683,8 @@ function rebuild({ fit = false } = {}) {
   notesPanel.setVault(vault);
   notesView.setVault(vault);
   ingestView.setVault(vault);
-  $('ingest-badge').textContent = ingestView.badge() || '';
+  promotionView.setVault(vault);
+  updateIngestCounts();
   $('tasks-badge').textContent = vault.tasks.filter((t) => t.status !== 'done').length || '';
   $('notes-badge').textContent = [...vault.notes.values()].filter((n) => n.inbox && !noteInfo(n).wrapped).length || '';
   graph.setData(data, { fit });
@@ -588,7 +709,6 @@ async function saveFolder({ mode, root, scan, alias, color, oldAlias }) {
   if (mode === 'add') {
     workspace.add(root, alias, color);
     state.scans.set(alias, scan);
-    await seedTemplates(workspace.find(alias), scan);
     await scanFolder(workspace.find(alias)); // starts watching it too
     rebuild({ fit: true });
     return;
@@ -602,26 +722,6 @@ async function saveFolder({ mode, root, scan, alias, color, oldAlias }) {
     if (state.openId?.startsWith(oldAlias + ':')) state.openId = alias + state.openId.slice(oldAlias.length);
   }
   rebuild();
-}
-
-// A newly linked folder without a Templates folder gets one, with a sample note template and a
-// sample page template copied from the app (app/templates/). A folder that has one is left alone.
-async function seedTemplates(folder, scan) {
-  const has = (scan.folders || []).some((f) => f.toLowerCase() === TEMPLATES_DIR.toLowerCase());
-  if (has) return;
-  const made = [];
-  for (const path of SEED_TEMPLATES) {
-    try {
-      const response = await fetch(`templates/${path.slice(TEMPLATES_DIR.length + 1)}`);
-      if (!response.ok) throw new Error(`the app's copy is missing (${response.status})`);
-      const text = await response.text();
-      await call('createNote', { root: folder.root, path, lines: text.replace(/\r\n/g, '\n').split('\n') });
-      made.push(path);
-    } catch (err) {
-      toast(`Couldn't add ${path}: ${err.message}`);
-    }
-  }
-  if (made.length) toast(`Added a Templates folder to ${folder.alias} with a sample note template and a sample page template.`);
 }
 
 function removeFolder(alias) {
@@ -662,7 +762,7 @@ function refreshPanel(options) {
 // Applies the panel's folder visibility, tag filter and coloring to the graph, and
 // updates the stats line.
 function applyStyle({ fit = false } = {}) {
-  const { selected, colorBy, showDuplicates, showNotes, showScripts } = panel.state();
+  const { selected, colorBy, showDuplicates, showNotes, showScripts, showSessions } = panel.state();
   const filters = [...selected];
   const folders = new Map(workspace.list().map((f) => [f.alias, f]));
   const matchedTag = (node) => filters.find((f) => node.tags.some((t) => tagMatches(t, f)));
@@ -670,7 +770,7 @@ function applyStyle({ fit = false } = {}) {
 
   const isVisible = (node) => {
     if (!node || typeof node !== 'object') return true;
-    if ((node.inbox && !showNotes) || (node.script && !showScripts)) return false;
+    if ((node.inbox && !showNotes) || (node.script && !showScripts) || (node.session && !showSessions)) return false;
     // Ghost notes belong to no folder; show them if a visible folder links to them.
     const inShownFolder = node.ghost ? node.linkedFrom.some(folderShown) : folderShown(node.folder);
     return inShownFolder && (!filters.length || Boolean(matchedTag(node)));
@@ -760,7 +860,7 @@ function showView(view) {
   if (state.view === 'notes' && view !== 'notes') notesView.flush();
   state.view = view;
   if (state.vault) store('lastView', view);
-  for (const name of ['graph', 'tasks', 'note', 'notes', 'ingest']) {
+  for (const name of ['graph', 'tasks', 'note', 'notes', 'ingest', 'settings']) {
     $(`${name}-view`).hidden = view !== name;
     $(`rail-${name}`).classList.toggle('active', view === name);
   }
@@ -769,6 +869,8 @@ function showView(view) {
     $('note').innerHTML = '<p class="empty-page">Open a page from the files, the graph or search.</p>';
   }
   if (view === 'notes') notesView.shown();
+  if (view === 'settings') settingsView.shown();
+  if (view === 'ingest') showIngestTab(load('ingestTab'));
   // The file tree marks what's in front: the note in the Notes view, else the open page.
   explorer.setActive(view === 'notes' ? notesView.shownId() : state.openId);
   updateTitle();
@@ -776,7 +878,7 @@ function showView(view) {
 
 // The name of what's shown, at the left of the top bar.
 function updateTitle() {
-  const titles = { graph: 'Graph', tasks: 'Tasks', ingest: 'Ingest', notes: `Notes${notesView.shownId() ? ` / ${notesView.title()}` : ''}` };
+  const titles = { graph: 'Graph', tasks: 'Tasks', ingest: 'Ingest', settings: 'Settings', notes: `Notes${notesView.shownId() ? ` / ${notesView.title()}` : ''}` };
   let title = titles[state.view];
   if (state.view === 'note') {
     title = state.openId ? `${state.editingId ? '✎ ' : ''}${pageTitle(state.openId)}` : 'Page';
@@ -795,15 +897,47 @@ function notesFolder() {
 }
 
 // The folder inside it that holds notes ("Notes" unless changed on the Notes start page).
+// The path list's notes_folder is the one source of truth; the page keeps a copy (loadPaths).
+let notesFolderName = DEFAULT_NOTES_DIR;
 function notesDir() {
-  return cleanNotesDir(load('notesDir')) || DEFAULT_NOTES_DIR;
+  return notesFolderName;
 }
+
+// The notes folder and the Daily/Weekly templates, from the path list (listPaths, readPathFile).
+async function loadPaths() {
+  try {
+    const entry = (await call('listPaths')).find((r) => r.name === 'notes_folder');
+    notesFolderName = cleanNotesDir(entry?.path) || DEFAULT_NOTES_DIR;
+  } catch { /* keep the last one */ }
+  const defaults = {};
+  for (const [name, slot] of [['Daily', 'template.daily'], ['Weekly', 'template.weekly']]) {
+    const text = await readSlot(slot);
+    if (text) defaults[name] = text;
+  }
+  setDefaultTemplates(defaults);
+}
+
+// The text of a prompt/template slot ('' when it can't be read).
+async function readSlot(name) {
+  try {
+    return ((await call('readPathFile', { name })).text || '').replace(/\r\n/g, '\n');
+  } catch {
+    return '';
+  }
+}
+const fillAlias = (text, alias) => text.replace(/\{\{\s*alias\s*\}\}/g, alias);
 
 // From the "Where new notes are saved" box: { alias } and/or { dir }. Notes are found by their
 // folder, so the lists are rebuilt.
 function setNotesLocation({ alias, dir }) {
   if (alias) store('notesFolder', alias);
-  if (dir !== undefined) store('notesDir', cleanNotesDir(dir) || DEFAULT_NOTES_DIR);
+  if (dir !== undefined) {
+    call('setPath', { name: 'notes_folder', path: cleanNotesDir(dir) || '' })
+      .then(loadPaths)
+      .then(() => state.vault && rebuild())
+      .catch((err) => toast(err.message));
+    return;
+  }
   if (state.vault) rebuild();
 }
 
@@ -958,6 +1092,23 @@ async function start() {
     $('welcome-open').hidden = true;
     return;
   }
+  // Until a place has been chosen for WikiApp's private folder, the app is just the setup screen.
+  let first = null;
+  try {
+    first = await call('firstRunState');
+  } catch (err) {
+    showWelcome(err.message);
+    return;
+  }
+  if (!first.chosen || (!first.location_exists && !first.from_env)) {
+    const known = [...(await call('getStartupFolders').catch(() => [])), ...workspace.list().map((f) => f.root)];
+    showSetup($('setup-screen'), first, () => known);
+    return;
+  }
+  refreshAi();
+  await loadEngineModels();
+  await loadPaths();
+  if (first.leftovers?.length) showLeftovers($('settings-dialog'), first.leftovers);
   // Folders passed on the command line join the workspace (alias from the folder name).
   for (const root of await call('getStartupFolders')) {
     if (!workspace.hasRoot(root)) workspace.add(root, workspace.suggestAlias(root));
@@ -968,7 +1119,8 @@ async function start() {
   } else {
     showWelcome();
   }
-  await ingestView.load();
+  ingestView.load();
+  await promotionView.load();
 }
 
 // Back to where the last run left off: the open page, the note in the Notes view, the view.
@@ -983,7 +1135,12 @@ function restoreSession() {
     notesView.show(note);
     notesPanel.setActive(note);
   }
-  showView(['graph', 'note', 'notes', 'tasks', 'ingest'].includes(view) ? view : 'graph');
+  showView(['graph', 'note', 'notes', 'tasks', 'ingest', 'settings'].includes(view) ? view : 'graph');
 }
 
 start();
+
+// The AI banner (Ingest view) links to Settings.
+document.addEventListener('click', (e) => {
+  if (e.target.closest('[data-goto="settings"]')) showView('settings');
+});

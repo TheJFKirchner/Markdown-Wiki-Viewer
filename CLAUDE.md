@@ -6,13 +6,12 @@ A small, customizable, Obsidian-style app for folders of Markdown notes. It open
 
 - **Anyone can clone the folder and run it on Windows or macOS.**
   - They double-click `WikiApp.cmd` or `WikiApp.command`.
-  - The first start runs `App Files/setup.py`, which makes `App Files/.venv` and installs `requirements.txt`. Every later start is quick.
-  - The only prerequisite is Python 3.10+. No console window stays open.
+  - The first start runs `App Files/setup.py`, which makes `App Files/.venv`, installs `requirements.txt`, and finds and installs agentlib (below). Every later start is quick.
+  - Prerequisites: Python 3.11+, and for the AI features agentlib beside the project folder, set up once (its `setup/claude-setup.md`, checked with `python -m agentlib.check`). No console window stays open.
+- **All agent code goes through agentlib** (`..\General-Purpose-Productivity\agentlib`, see the top-level CLAUDE.md). Never import `claude_agent_sdk`, never run `claude -p`. agentlib is never copied into the app: `setup.py` installs it editable. Test agents on agentlib's fake engine (zero tokens).
+- **The app decides nothing about where the user's things go.** Everything private to the user is in one `.wiki` folder at a place they choose; every path comes from `host/pathlist.py`, and Settings shows them all. Never hard-code a path, never write into `~/.claude` or into a wiki's own folders beyond what a feature exists to write, and never create a folder the user didn't ask for.
 - **No build step for the app.** `App Files/app/` is plain HTML, CSS and ES modules. Press F5 (Cmd+R on a Mac) in the app to reload after an edit.
-- **Two hosts, one page.**
-  - `host/wikiapp.py` (pywebview) is the main host, for Windows and macOS.
-  - `WikiApp.exe` (C#) is the older Windows-only host, kept working. It needs no Python except for Ingest.
-  - Both answer the same commands, so a host change goes in both until the exe is retired.
+- **One host, one page.** `host/wikiapp.py` (pywebview) is the host, for Windows and macOS: it opens the window and answers the page's commands.
 - **Notes stay plain Markdown** that other editors can read. Tasks, quick notes and templates are all just text conventions (formats in README).
 - **Never lose or overwrite the user's text.** Every write goes through the host and is refused if the lines on disk changed since the page read them.
 
@@ -20,7 +19,7 @@ A small, customizable, Obsidian-style app for folders of Markdown notes. It open
 
 The project root has two folders, kept apart on purpose:
 
-- **`App Files/`**: everything the app is made of. Both hosts find `app/` and `ingest/` relative to themselves, so the folder works wherever it's copied.
+- **`App Files/`**: everything the app is made of. The host finds `app/`, `agents/`, `ingest/` and `sessions/` relative to itself, so the folder works wherever it's copied.
 - **`Sample Wikis/`**: the example wikis, `team/` and `personal/`, where present. They're data, not part of the app, and `.gitignore` keeps them out of the repo. The user also uses them as real data, so treat them as theirs.
 
 Also at the root:
@@ -30,10 +29,9 @@ Also at the root:
 - the launchers:
   - `WikiApp.cmd` must have CRLF line endings, and `WikiApp.command` LF. `.gitattributes` keeps them that way.
   - Keep both launchers tiny: the logic belongs in `setup.py`.
-- `.gitignore`: leaves out `.venv`, caches, `Share/` and `*.lnk`;
-- a `WikiApp.lnk` shortcut to `App Files\WikiApp.exe`. It holds this PC's absolute path, so it's never shared;
+- `.gitignore`: leaves out `.venv`, caches, `Share/`, `Sample Wikis/`, `.wiki/` (the user's private folder, suggested in the project folder) and `*.lnk` (a shortcut holds this PC's absolute path);
 - `make_share.py`, which builds a clean copy to send to others in `Share/`.
-  - It ships the app only: no wiki content (`Sample Wikis/` is never copied), `.venv`, caches or the shortcut.
+  - It ships the app only: no wiki content (`Sample Wikis/` is never copied), no `.wiki`, `.venv` or caches, and not agentlib.
   - Then it checks the copy for the user name.
   - Keep its include and exclude lists in step when adding top-level files.
 
@@ -41,68 +39,82 @@ Paths below, and in `ingest/DESIGN.md` and `ingest/AGENT.md`, are inside `App Fi
 
 | Path | What it is |
 |---|---|
-| `setup.py`, `requirements.txt` | Make `.venv` and install the packages (pywebview, claude-agent-sdk, pyyaml). Run before every start; returns at once when nothing changed. |
-| `host/wikiapp.py` | The main host. It opens the window and serves `app/` on 127.0.0.1 under a secret path. It answers the page's messages, keeps settings and the window position, and allows one instance. |
-| `host/notefiles.py`, `host/ingestruns.py` | The Python host's folder scans, note writes, folder watching (polling), and Ingest runs. |
-| `WikiApp.exe`, `bin/`, `host/WikiApp.cs`, `host/build.cmd` | The older Windows-only host, the WebView2 DLLs it loads, its source and build script. |
+| `setup.py`, `requirements.txt` | Make `.venv`, install the packages (pywebview, pyyaml, pywin32 on Windows) and agentlib (found beside the project folder, installed editable; it brings the Claude Agent SDK). Run before every start; returns at once when nothing changed. None or several agentlibs: the app starts with AI off and says why. |
+| `host/wikiapp.py` | The host. It opens the window and serves `app/` on 127.0.0.1 under a secret path. It answers the page's messages, keeps settings and the window position, and allows one instance (`instance.json`, or a guard port during the first start). |
+| `host/pathlist.py` | **Every path the app uses, in one list** (standard library only): the private `.wiki` folder and its contents, prompt and template slots (with status and reset), each wiki's rules, templates, index and progress, the transcripts folder, agentlib, the reference tag list; overrides in `.wiki/paths.json`; row state; engine settings and each agent's model; `read_prompt(name, **values)`. Add new paths here, never elsewhere. |
+| `host/appfolder.py` | The private folder's life: first run (preview, validation), choosing it, move or adopt, migration from older versions (copies only), leftovers, agentlib status and install, agentlib's connection check, opening an entry. |
+| `host/notefiles.py`, `host/ingestruns.py`, `host/sessionruns.py` | The host's folder scans, note writes, folder watching (polling), Promotion runs, the agents' prompt files, and the Notes, Sessions and Review tabs' calls to `sessions/sb.py`. |
+| `host/tests/`, `ingest/tests/`, `sessions/tests/` | Zero-token tests (temporary folders, agentlib's fake engine). Run all three before reporting work done. |
+| `agents/` | The three agents behind the Ingest view: `executive-assistant` (Notes capture and Sessions), `wiki-reviewer` (Review), `team-wiki-manager` (Promotion). Each has one prompt slot (`prompt.<agent id>`, by default `.wiki/prompts/<agent id>.md`), copied from the shipped default `agents/<agent id>/SKILL.md`; unedited copies follow newer defaults, edited ones are left alone. `agents/messages/` holds the other shipped wording (Promotion's messages, the capture and review requests, starters). `agentfiles.py` reads and saves the prompts. An agent is sent its file's text (frontmatter stripped), then what the code adds for that request. The agents never read, write or capture tasks; tasks live only in the notes where the user typed them. |
+| `sessions/` | Capture of sessions and notes, topic reviews (Current state, Related, conflicts), tags, folders and merges, behind the Notes, Sessions and Review tabs: `sb.py` and the `secondbrain` package (it also runs from the command line without the app; model calls through agentlib), the helper skills and the `wiki-lookup` agent that `sb.py install` copies into a `.claude` folder only when run, the templates, and its tests. It writes straight into the personal wiki with no review step, and only into a folder whose `WIKI.md` says `type: personal`. [sessions/README.md](<App Files/sessions/README.md>) explains it; [sessions/INTEGRATION.md](<App Files/sessions/INTEGRATION.md>) lists every command and its JSON. |
+| `app/js/capturenotes.js`, `sessionsview.js`, `reviewview.js`, `ingestview.js` | The Notes (capture), Sessions, Review and Promotion tabs. `main.js` owns the four tabs (`showIngestTab`) and the tab bar's **?** and **Agents and rules** buttons. `modelmenu.js` is the tabs' model menus (the engine settings' per-agent model). |
+| `app/js/settingsview.js`, `setup.js`, `ai.js` | The Settings screen (every path-list row, the AI engine), the first-run screen (where to keep `.wiki`), and whether the AI features can run. |
+| `host/app.ico`, `host/make-icon.ps1` | The window, taskbar and Dock icon, and the script that draws it. |
 | `app/index.html`, `app/css/styles.css` | The page shell and all styles. Every color is a CSS variable at the top of the stylesheet. |
 | `app/js/main.js` | The wiring: workspace scans → combined model → views. It owns the view rail, saving, and the start-up session restore. |
 | `app/js/vault.js` | The data model: notes, frontmatter, tags, `[[links]]`, duplicates and graph data. |
 | `app/js/*.js` | One module per feature: the tasks pane, notes and templates, search, the editors, the graph and its panel. Each file starts with a comment saying what it does. |
 | `app/lib/` | Third-party libraries (force-graph, markdown-it, js-yaml). |
-| `app/templates/` | The seed templates (`Notes/Sample note.md`, `Pages/Sample page.md`) copied into a newly linked folder that has no `Templates` folder. |
-| `ingest/` | The ingest agent, in Python with the Claude Agent SDK, written to be read by someone new to agent code: `agent.py` (the agent: what it's given, the loop, feedback rounds; start here), `tools.py` (its two tools, as plain functions), `prompts.py` (the text it's given), `wikis.py` (wiki scan, link resolution, index, page templates), `transcript.py` and `costs.py` (the run's record and prices), `progress.py` (lines for the app), `run.py` (the command line), `models.py` (the model menu's list, from Claude Code's start-up handshake, free), the shipped `agent-prompt.md`. Keep it that way: plain names, comments that explain agent ideas, plumbing kept apart from the agent's setup. [ingest/DESIGN.md](<App Files/ingest/DESIGN.md>) is the design; [ingest/AGENT.md](<App Files/ingest/AGENT.md>) is exactly what the agent sees and must stay in step with the code. |
+| `app/templates/` | The shipped templates (`Notes/Daily.md`, `Weekly.md`, `Sample note.md`, `Pages/Sample page.md`) and starters (`starters/`), copied into `.wiki` on setup. Nothing is ever seeded into a wiki. |
+| `ingest/` | The agent run behind the Promotion tab (the team wiki manager), in Python through agentlib, written to be read by someone new to agent code: `agent.py` (start here), `tools.py` (its tools, as plain functions), `prompts.py` (the text it's given, from the prompt slots), `wikis.py` (wiki scan, link resolution, index, page templates; rules and templates from the path list), `transcript.py` and `costs.py`, `progress.py`, `run.py` (the command line), `models.py` (the model menu's list, free). Keep it that way: plain names, comments that explain agent ideas. [ingest/DESIGN.md](<App Files/ingest/DESIGN.md>) is the design; [ingest/AGENT.md](<App Files/ingest/AGENT.md>) is exactly what the agent sees and must stay in step with the code. |
 
 ## Conventions
 
 - **Note ids** are `alias:path` (for example `personal:Notes/2026-10-31 Daily.md`). Links can name a folder: `[[team:Jupiter]]`.
 - **Page ↔ host** talk through JSON messages in `app/js/bridge.js`.
-  - The Python host gets them in `Host.dispatch` in `wikiapp.py` (through `window.pywebview.api.call`).
-  - The exe gets them in `Dispatch` in `WikiApp.cs` (through WebView2 `postMessage`).
-  - The Python host's `settings.js` sets `window.__wikiappHost = 'python'`, which tells the page which one it's in.
-  - The hosts only write `.md` files inside an open folder, plus their own data.
-- **Per-user data:**
-  - The Python host keeps it in `~/.wikiapp` (`WIKIAPP_DATA_DIR` overrides): `settings.json`, `window.txt`, `ingest/`, `ingest-runs/`, `instance.json`. On first start it copies the exe's settings over.
-  - The exe uses `%LOCALAPPDATA%\WikiApp` and `%TEMP%\WikiApp\ingest-runs`.
+  - The host gets them in `Host.dispatch` in `wikiapp.py` (through `window.pywebview.api.call`).
+  - The host's `settings.js` sets `window.__wikiappHost = 'python'`, which tells the page it's in the app and not a plain browser.
+  - The host only writes `.md` files inside an open folder, plus files in the private folder and path-list files the user saves.
+- **Per-user data** is in one private folder named `.wiki`, at a place the user picks on the first start (suggested: the project folder, git-ignored). The only fixed thing is the pointer `~/.wikiapp-location`. `WIKIAPP_DATA_DIR` names the folder directly (dev runs); `WIKIAPP_POINTER_FILE` moves the pointer (tests). It holds `settings.json`, `window.txt`, `instance.json`, `engine.json` (engine and each agent's model, the one source of truth the tabs read and write), `paths.json`, `prompts/`, `templates/`, `starters/`, `indexes/`, `progress/` (what capture has done, per wiki; was `<wiki>/.sb`), `ingest/pending-promotion.json`, `ingest-runs/`, `leftovers.json`. TECHNICAL.md §7 has every entry.
+  - Nothing is created until a place is chosen. A configured path that has gone is reported (`state: "missing"`), never recreated.
+  - Changing the place later is move (to an empty place) or adopt (an existing `.wiki`), never merge.
+  - The first start copies, never deletes: `~/.wikiapp` (or what the retired Windows-only version left in `%LOCALAPPDATA%\WikiApp` and `%TEMP%\WikiApp\ingest-runs`) and the agents' prompts from `~/.claude/skills` (`appfolder.migrate`). Keep that migration. The retired Notes flow's files are not carried forward. A one-time leftovers list is shown.
+  - The user's own files: `personal_capture_rules` (free-text capture rules for the personal wiki; created once, never overwritten or reset), `personal_tags` (`personal-tags.md` in the personal wiki), and `tag_list_reference` (optional, any tags file; read only, never written).
 - **Quick notes** are the files in the notes folder (setting `notesDir`, default `Notes`) of any workspace folder; `note.inbox` marks them. The Notes view and the full editor both edit through `livetext.js`, which keeps the text as Markdown lines and only formats the display.
 - **Editing as it looks** (`livetext.js` + `richtext.js`): each line is a row with a `contenteditable` box.
   - The box holds the line's inline Markdown, rendered by `viewer.renderEditable` (no typographer; marks carry `data-md`, `[[links]]` carry `data-src` and are uneditable atoms).
   - `serialize` turns the box back into Markdown on every keystroke. The row's prefix (`##`, `- `, `1. `, indent) is kept aside in `row._kind`.
   - A line whose Markdown doesn't survive render → `serialize` unchanged is shown raw (class `raw`). Never relax that check: it's what keeps edits from rewriting text the user didn't touch.
   - Structural edits (Enter, Backspace joins, Tab, shortcuts) change `lines`, then `redrawAt` redraws and puts the caret back.
-- **Templates:** a wiki's `Templates/` folder has `Notes/` (quick-note templates, for the New note menu; files directly in `Templates/` still count, the older layout) and `Pages/` (page templates for Ingest's new pages, `description` = when to use it). Everything under `Templates/` is left out of the graph, tags and tasks. Linking a folder without `Templates/` copies the seeds in `app/templates/` into it (`seedTemplates` in `main.js`).
+- **Wiki rules:** a wiki's rules file (path-list `wiki.<alias>.rules`, default `<wiki>/wiki_rules.md`) reaches every agent that works in that wiki, the executive assistant and the wiki reviewer included. `WIKI.md` only marks a folder as personal; its body is not used as rules.
+- **Only Promotion reaches a team wiki.** Notes and sessions are captured only into the personal wiki; Promotion proposes each team-wiki change as a card the user accepts.
+- **Topics, tags and folders (personal wiki):**
+  - A topic is a page about one piece of work (`type: topic`), kept at the top level as `<slug>.md`, with Current state, Related, Notes and Log.
+  - Pages carry no marker comments. `sb.py` finds the parts it writes by their `##` headings (`get_zone` and `set_zone` in `wiki.py`), and leaves a page alone, with an error, if a heading is missing. A topic's log is written again from the records (`rebuild_log`) on every capture and merge, never edited in place; each line is marked `[note]` or `[session]`. Related is written again by each review.
+  - Notes outrank sessions: a contradicting session raises a conflict (Current state follows the note) for the user to settle in the Review tab.
+  - A tag is only a label in a topic's frontmatter `tags:` saying what kind of thing it is and what it belongs to (there is no `kind` field any more). Tags come from the reference tag list and the personal tags. A tag has no page of its own.
+  - Records live in one flat `Sessions/` folder (`type: session`, `origin: session` or `note`). A record's frontmatter has `topics:` and `tags:` (the union of its topics' tags), so they are ordinary tags in the app.
+  - When three or more top-level topics share a tag, the tag can become a folder `<tag>/` with a hub page `<tag>/<tag>.md` (`type: folder`). A topic lives in one folder at most and keeps all its tags.
+  - Topics, and tags, that duplicate each other can be merged (`merge_topics`, `merge_tags` in `sessions/secondbrain/wiki.py`).
+  - Links go by page name, so moving or merging a page breaks nothing.
+  - A wiki from the first version (`tags/`, `session-notes/<year>/`) is upgraded the first time it's used (`upgrade_layout` in `wiki.py`). Keep that upgrade.
+- **Templates:** a wiki's `Templates/` folder has `Notes/` (quick-note templates, for the New note menu; files directly in `Templates/` still count, the older layout) and `Pages/` (page templates for Promotion's new pages, `description` = when to use it). Everything under `Templates/` is left out of the graph, tags and tasks. A wiki without `Templates/` uses the private `.wiki/templates/`; nothing is ever seeded into a wiki.
 - **Scripts** (`.sql`, `.py`... see `SCRIPT_EXT` in `vault.js`) live in `vault.scripts`, not `vault.notes`. They're link targets only (`resolveTarget` = notes, then scripts) and their text is read on demand, never scanned for links.
-- **Settings** use `localStorage`. `app/js/persist.js` mirrors it into `settings.json`, so the app opens the same way however it's started. The Python host's page starts each run with empty storage, because its origin has a new random port, so there the file is what counts.
-- **The exe's host is C# 5:** the compiler built into Windows is used, so no `$"..."`, `?.` or `=>` members. Rebuild with `host\build.cmd /nopause`, after closing the exe (it's locked while it runs).
+- **Settings** use `localStorage`. `app/js/persist.js` mirrors it into `settings.json`, so the app opens the same way however it's started. The page starts each run with empty storage, because its origin has a new random port, so the file is what counts.
 - Match the existing style: small modules, a short header comment per file, plain DOM, no frameworks.
 - **Write scripts in Python where possible** (tooling, the ingest agent, one-off helpers). Don't force it where it would complicate things: the page stays JavaScript, and a tiny launcher can stay a `.cmd` or `.command`.
 
 ## Working on it
 
-- **Test in the real app on copies, never on the user's folders.** The Python host makes this easy.
+- **Test in the real app on copies, never on the user's folders.**
   1. Copy `Sample Wikis/` (or any test wiki) to a scratch folder.
   2. Write a scratch `settings.json` whose `workspace` points at the copies.
-  3. Start `App Files/.venv/Scripts/python.exe App Files/host/wikiapp.py` with `WIKIAPP_DATA_DIR=<scratch data folder>` and `WIKIAPP_DEBUG_PORT=9334`.
+  3. Start `App Files/.venv/Scripts/python.exe App Files/host/wikiapp.py` with `WIKIAPP_DATA_DIR=<scratch data folder>` and `WIKIAPP_DEBUG_PORT=9334`. (To try the first-run screen, set `WIKIAPP_POINTER_FILE` to a scratch file that doesn't exist instead, and choose a scratch place.)
   4. Drive it through the DevTools protocol (`http://127.0.0.1:9334/json`; the page URL contains `127.0.0.1`).
   5. Check afterwards that the real sample files are unchanged.
 
-  With `WIKIAPP_DATA_DIR` set, the user's settings are never touched, and the migration from the exe is skipped. The user's signature and folder list have been overwritten by tests before.
+  With `WIKIAPP_DATA_DIR` set, the user's own `.wiki` folder and pointer are never touched, and no migration runs. Tests must set `WIKIAPP_POINTER_FILE` (or `WIKIAPP_DATA_DIR`) to scratch paths and replace `appfolder.old_locations`, or they read the user's real folder and older data. Never press Test connection, or call `testConnection`, in a test: it sends a real request; use agentlib's fake engine. The user's signature and folder list have been overwritten by tests before.
 
   **Things to know when testing on Windows:**
   - **The venv's `python.exe` is a launcher.** The real process is a child (`python3.13.exe`, or `pythonw3.13.exe`), and that child owns the window.
     - Find it by command line containing `wikiapp.py`. It may have forward slashes if a bash shell started it.
     - Start the user's real copy with PowerShell `Start-Process`, not as a bash background job, which the Bash tool ends with the command.
   - **Pinning depends on `set_taskbar_identity`** (pywin32, on the window's thread). If "Pin to taskbar" or the icon goes missing, check its four window properties (ID, relaunch command, name, icon) first.
-  - **Shells started by the Claude desktop app see a virtualized `%LOCALAPPDATA%`.** That matters for testing the exe.
-    - What they create there lands in `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Local\`, and they see that copy merged over the real folder.
-    - So an exe started from such a shell may use a different `WikiApp` data folder than the one the user's double-click uses.
-    - Renaming that folder aside doesn't give a clean profile: it exposes the user's real one instead.
-    - To test the exe, back up its `settings.json` and start it with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`.
-- **Ingest test runs call Claude** and cost a few cents each.
-  - Try the prompts first with `run.py <job.json> --prepare-only`.
+- **Live agent runs cost money.** Test on agentlib's fake engine first (the three test suites do).
+  - Try the Promotion prompts with `run.py <job.json> --prepare-only` (no request).
   - A job naming a note that doesn't exist stops before calling Claude. That's a free way to test the run plumbing.
 - **Moving the sample wikis** breaks the folder paths saved in `settings.json`. To fix it, close the app, rewrite the `workspace` roots in that file, and raise `__rev` above the browser copy's so the file wins (see `persist.js`).
-- **Only one instance runs.** A second launch just focuses the first (the Python host uses `instance.json` in its data folder), so use a separate `WIKIAPP_DATA_DIR` for a debug copy.
+- **Only one instance runs.** A second launch just focuses the first (the host uses `instance.json` in the private folder, or the guard port during a first start), so use a separate `WIKIAPP_DATA_DIR` for a debug copy. A test that probes the guard must patch `guard_port`, or it reaches a real running copy.
 - **macOS can't be tested here.** Mac-only code paths (`WikiApp.command`, Dock icon, `open`, process groups) are untested until someone runs them on a Mac.
 - **Edit files with the editor tools, not shell scripts.**
   - Heredocs in the shell have eaten backslashes (`\n`, `\r\n`) in code.

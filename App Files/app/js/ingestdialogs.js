@@ -1,7 +1,8 @@
 // The Ingest view's windows:
-//   Edit ingestion prompt: one tab each for the shipped agent prompt (read-only), the user's own
-//     notes for the agent (saved in the app's data folder), the page templates (a list: each
-//     wiki's Templates/Pages files), and each wiki's wiki_rules.md.
+//   Agents and rules: an Agents tab listing the four agents (note taker, executive assistant,
+//     wiki reviewer, team wiki manager) with a way to see and edit each one's prompt file (a
+//     Claude Code skill), the page templates (a list: each wiki's Templates/Pages files), and
+//     one tab per wiki for its wiki_rules.md.
 //   How Ingest works (the ? button): plain-language explanation with a picture of the agent loop.
 //   A past run (from Past runs): its transcript.json, request by request, with tokens and cost.
 
@@ -9,16 +10,8 @@ import { RULES_FILE } from './vault.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
-const starterRules = (alias) =>
-  [
-    '---', `description: How the ingest agent writes in the ${alias} wiki.`, '---', `# ${alias} wiki rules`, '',
-    '## Where things go', '- (which folder or page each kind of note content belongs on)', '',
-    '## New pages', '- (which kinds of page may be created, and in which folder; anything else is left out)', '',
-    '## Style', '- ', '',
-  ].join('\n');
-
 export function createIngestDialogs(backdrop, {
-  getInfo, saveNotes, getWikis, saveRules, getPageTemplates, openPageTemplate, newPageTemplate, getLogRaw, setLogRaw, openRunFolder,
+  getAgents, saveAgent, getWikis, saveRules, getPageTemplates, openPageTemplate, newPageTemplate, getLogRaw, setLogRaw, openRunFolder,
 }) {
   let close = null;
 
@@ -44,83 +37,115 @@ export function createIngestDialogs(backdrop, {
     backdrop.querySelector('[data-close]')?.addEventListener('click', () => close());
   }
 
-  // ---- Edit ingestion prompt ----------------------------------------------------------------
+  // ---- Agents and rules ------------------------------------------------------------------------
 
-  function openPrompt(startTab = 'notes') {
-    const info = getInfo();
-    const wikis = getWikis(); // [{ alias, color, text (or null when there's no rules file) }]
-    // The shipped agent prompt (ingest/agent-prompt.md) is shown read-only: it updates with the app.
+  async function openPrompt(startTab = 'agents') {
+    // [{ alias, path, color, text (or null when there's no rules file), starter }]: the rules are read
+    // through the path list (wiki.<alias>.rules), the starter from template.rules-starter.
+    const wikis = await getWikis();
+    // The four agents and their prompt files: [{ id, name, tab, job, path, text, default, changed }].
+    let agents = [];
+    let agentsError = '';
+    try {
+      agents = await getAgents();
+    } catch (err) {
+      agentsError = err.message;
+    }
     const tabs = [
-      { id: 'agent', label: 'Agent prompt', text: info.prompt || '', readOnly: true },
-      { id: 'notes', label: 'Your notes', text: info.userNotes || '' },
-      { id: 'templates', label: 'Page templates', text: '', list: true },
-      ...wikis.map((w) => ({ id: `rules:${w.alias}`, label: `${w.alias} rules`, alias: w.alias, color: w.color, exists: w.text !== null, text: w.text ?? starterRules(w.alias) })),
+      { id: 'agents', label: 'Agents', list: true },
+      { id: 'templates', label: 'Page templates', list: true },
+      ...wikis.map((w) => ({ id: `rules:${w.alias}`, label: `${w.alias} rules`, alias: w.alias, path: w.path, color: w.color, exists: w.text !== null, text: w.text ?? w.starter })),
     ];
-    const drafts = new Map(tabs.map((t) => [t.id, t.text]));
-    const saved = new Map(tabs.map((t) => [t.id, t.text])); // what's on disk (or the starter text)
-    let current = tabs.find((t) => t.id === startTab) ? startTab : 'notes';
-    let area = null;
+    // What's being edited, by key: a rules tab's id, or "agent:<id>" for an agent's prompt.
+    const drafts = new Map([...tabs.filter((t) => !t.list).map((t) => [t.id, t.text]), ...agents.map((a) => [`agent:${a.id}`, a.text])]);
+    const saved = new Map(drafts); // what's on disk (or the starter text)
+    const labels = new Map([...tabs.map((t) => [t.id, t.label]), ...agents.map((a) => [`agent:${a.id}`, `${a.name}'s prompt`])]);
+    let current = tabs.find((t) => t.id === startTab) ? startTab : 'agents';
+    let openAgent = null; // the agent whose prompt is shown, on the Agents tab
 
     show(
-      `<div class="dialog ingest-dialog" role="dialog" aria-label="Edit ingestion prompt">
-        <h2 class="dialog-title">Ingestion prompt</h2>
-        <p class="field-hint">On every run Claude gets WikiApp's built-in instructions, then your notes, then each wiki's rules. The page templates' names and descriptions come with the index of pages.</p>
+      `<div class="dialog ingest-dialog" role="dialog" aria-label="Agents and rules">
+        <h2 class="dialog-title">Agents and rules</h2>
+        <p class="field-hint">Four agents do the Ingest view's work, one for each tab. Each has one prompt file. Every wiki's rules are added to what an agent is sent whenever it reads or writes in that wiki.</p>
         <div class="ingest-tabs" role="tablist">
           ${tabs.map((t) => `<button class="ingest-tab" role="tab" data-tab="${esc(t.id)}" ${t.color ? `style="--wiki:${esc(t.color)}"` : ''}>${esc(t.label)}</button>`).join('')}
         </div>
         <p class="field-hint ingest-tab-hint"></p>
         <textarea class="ingest-prompt-text" spellcheck="false"></textarea>
         <div class="ingest-templates" hidden></div>
-        <label class="ingest-check"><input type="checkbox" class="ingest-lograw" ${getLogRaw() ? 'checked' : ''}> Also save each run's raw requests in its run folder, to check exactly what was sent</label>
+        <label class="ingest-check"><input type="checkbox" class="ingest-lograw" ${getLogRaw() ? 'checked' : ''}> Also save each Notes and Promotion run's raw requests in its run folder, to check exactly what was sent</label>
         <div class="dialog-actions">
           <span class="ingest-save-status"></span>
           <span class="spacer"></span>
+          <button class="secondary-button ingest-reset" hidden title="Put the prompt that ships with WikiApp back in the box. Nothing changes until you save.">Reset to default</button>
           <button class="secondary-button" data-close>Close</button>
           <button class="primary-button ingest-save">Save</button>
         </div>
       </div>`,
       () => {
         keepDraft();
-        const unsaved = tabs.filter((t) => drafts.get(t.id) !== saved.get(t.id));
-        return !unsaved.length || confirm(`Discard unsaved changes to ${unsaved.map((t) => t.label).join(', ')}?`);
+        const unsaved = [...drafts.keys()].filter((k) => drafts.get(k) !== saved.get(k));
+        return !unsaved.length || confirm(`Discard unsaved changes to ${unsaved.map((k) => labels.get(k)).join(', ')}?`);
       },
     );
 
     const dialog = backdrop.querySelector('.ingest-dialog');
-    area = dialog.querySelector('.ingest-prompt-text');
+    const area = dialog.querySelector('.ingest-prompt-text');
     const list = dialog.querySelector('.ingest-templates');
     const hint = dialog.querySelector('.ingest-tab-hint');
     const saveButton = dialog.querySelector('.ingest-save');
+    const resetButton = dialog.querySelector('.ingest-reset');
     const status = dialog.querySelector('.ingest-save-status');
 
-    // The text being edited on the current tab (the templates tab is a list, not text).
+    // The key of the text in the box right now, or null when a list is showing instead.
+    const editing = () => (current === 'agents' ? (openAgent ? `agent:${openAgent}` : null) : tabs.find((t) => t.id === current).list ? null : current);
+
     function keepDraft() {
-      if (!tabs.find((t) => t.id === current).list) drafts.set(current, area.value);
+      const key = editing();
+      if (key) drafts.set(key, area.value);
     }
 
-    function select(id) {
+    function select(id, agentId = null) {
       keepDraft();
       current = id;
+      openAgent = id === 'agents' ? agentId : null;
       const tab = tabs.find((t) => t.id === id);
+      const key = editing();
       for (const b of dialog.querySelectorAll('.ingest-tab')) b.classList.toggle('active', b.dataset.tab === id);
-      area.hidden = Boolean(tab.list);
-      list.hidden = !tab.list;
-      area.value = drafts.get(id);
-      area.readOnly = Boolean(tab.readOnly);
-      saveButton.hidden = Boolean(tab.readOnly || tab.list);
+      area.hidden = !key;
+      list.hidden = Boolean(key);
+      saveButton.hidden = !key;
+      resetButton.hidden = !openAgent;
       status.textContent = '';
-      if (tab.list) {
-        hint.innerHTML = `Pages Claude may follow when it makes a new page: the files in each wiki's <code>Templates/Pages</code> folder. Each run, Claude sees only every template's name and description (from its frontmatter), and opens a template only when it's about to propose a new page that fits.`;
+      if (key) area.value = drafts.get(key);
+      if (id === 'agents' && openAgent) {
+        const agent = agents.find((a) => a.id === openAgent);
+        hint.innerHTML = `<button class="link-button ingest-back" data-back>← All agents</button> <strong>${esc(agent.name)}</strong> · the ${esc(agent.tab)} tab. This is the whole prompt, and it's a Claude Code skill: <code>${esc(agent.path)}</code>. WikiApp sends everything below the top block (the lines between the two <code>---</code>), then adds the material to work on and the rules of the wikis involved.`;
+      } else if (id === 'agents') {
+        hint.innerHTML = 'Each agent\'s prompt is one file, kept as a Claude Code skill on this computer, so the same text works when you call the skill in Claude Code. App updates never replace a prompt you\'ve edited.';
+        drawAgents();
+      } else if (tab.list) {
+        hint.innerHTML = `Pages the note taker and the team wiki manager may follow when they make a new page: the files in each wiki's <code>Templates/Pages</code> folder. An agent sees only every template's name and description (from its frontmatter), and opens a template only when it's about to propose a new page that fits.`;
         drawTemplates();
-      } else if (id === 'agent') {
-        hint.innerHTML = tab.text
-          ? 'WikiApp\'s built-in instructions, sent first on every run. Read-only: they come with the app (<code>ingest/agent-prompt.md</code>) and update with it. <code>{{user_notes}}</code> and <code>{{wikis}}</code> mark where your notes and each wiki\'s rules go.'
-          : 'The built-in instructions couldn\'t be read (<code>ingest/agent-prompt.md</code> is missing).';
-      } else if (id === 'notes') {
-        hint.innerHTML = 'Your own instructions, added under "Notes from the user". Kept on this computer, so app updates never replace them.';
       } else {
-        hint.innerHTML = `Saved as <code>${esc(tab.alias)}/${RULES_FILE}</code>. Claude follows these when it writes in this wiki.${tab.exists ? '' : ' This wiki has no rules file yet: saving creates one from this starter.'}`;
+        hint.innerHTML = `Saved as <code>${esc(tab.path || `${tab.alias}/${RULES_FILE}`)}</code> (the rules file in this wiki's entry in Settings). Every agent follows these when it works in this wiki.${tab.exists ? '' : ' This wiki has no rules file yet: saving creates one from this starter.'}`;
       }
+    }
+
+    // The four agents: who does which tab's work, and a way to see each one's prompt.
+    function drawAgents() {
+      if (agentsError) {
+        list.innerHTML = `<p class="field-error">The agents' prompt files couldn't be read: ${esc(agentsError)}</p>`;
+        return;
+      }
+      const rows = agents.map((a) => `
+        <tr>
+          <td><strong>${esc(a.name)}</strong></td>
+          <td><span class="ingest-kind">${esc(a.tab.toUpperCase())}</span></td>
+          <td>${esc(a.job)}${drafts.get(`agent:${a.id}`) !== a.default ? ' <span class="session-faint">Edited.</span>' : ''}</td>
+          <td><button class="secondary-button" data-agent="${esc(a.id)}" title="${esc(a.path)}">See the prompt</button></td>
+        </tr>`).join('');
+      list.innerHTML = `<table class="ingest-template-list ingest-agent-list"><thead><tr><th>Agent</th><th>Tab</th><th>What it does</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
     }
 
     // The page templates: one row each (wiki, name, when to use it, file), and a way to add one.
@@ -145,13 +170,15 @@ export function createIngestDialogs(backdrop, {
         </div>`;
     }
 
-    // Opening a template leaves this window, which asks first if a tab has unsaved changes.
+    // Opening a template leaves this window, which asks first if anything is unsaved.
     function leaveFor(open) {
       close();
       if (backdrop.hidden) open();
     }
 
     list.addEventListener('click', (e) => {
+      const agent = e.target.closest('[data-agent]');
+      if (agent) return select('agents', agent.dataset.agent);
       const opened = e.target.closest('[data-open-template]');
       if (opened) return leaveFor(() => openPageTemplate(opened.dataset.openTemplate));
       if (e.target.closest('[data-new-template]')) {
@@ -164,22 +191,30 @@ export function createIngestDialogs(backdrop, {
     list.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && e.target.matches('.ingest-template-name')) list.querySelector('[data-new-template]').click();
     });
+    hint.addEventListener('click', (e) => {
+      if (e.target.closest('[data-back]')) select('agents');
+    });
     dialog.querySelector('.ingest-tabs').addEventListener('click', (e) => {
       const tab = e.target.closest('[data-tab]');
       if (tab) select(tab.dataset.tab);
     });
     dialog.querySelector('.ingest-lograw').addEventListener('change', (e) => setLogRaw(e.target.checked));
+    resetButton.addEventListener('click', () => {
+      area.value = agents.find((a) => a.id === openAgent).default;
+      status.textContent = 'The default is in the box. Save to use it.';
+    });
     saveButton.addEventListener('click', async () => {
+      const key = editing();
       const tab = tabs.find((t) => t.id === current);
       const text = area.value.replace(/\r\n/g, '\n');
       saveButton.disabled = true;
       status.textContent = 'Saving…';
-      const result = tab.id === 'notes' ? await saveNotes(text) : await saveRules(tab.alias, text, saved.get(tab.id));
+      const result = openAgent ? await saveAgent(openAgent, text) : await saveRules(tab.alias, text, saved.get(key));
       saveButton.disabled = false;
       if (result === true) {
-        drafts.set(tab.id, text);
-        saved.set(tab.id, text);
-        tab.exists = true;
+        drafts.set(key, text);
+        saved.set(key, text);
+        if (!openAgent) tab.exists = true;
         status.textContent = 'Saved. The next run uses it.';
       } else {
         status.textContent = `Not saved: ${result}`;
@@ -194,27 +229,35 @@ export function createIngestDialogs(backdrop, {
     show(`
       <div class="dialog ingest-dialog ingest-help-dialog" role="dialog" aria-label="How Ingest works">
         <h2 class="dialog-title">How Ingest works</h2>
-        <p>Ingest turns finished notes into updates to your wiki pages. Claude reads the notes, works out which pages they belong on, and suggests changes. You decide what is kept: nothing is written until you accept it.</p>
-        ${diagram()}
-        <h3>What happens when you press Ingest</h3>
+        <p>The Ingest view has four tabs. Three of them (Notes, Sessions and Review) write straight into your <strong>personal wiki</strong>, with nothing to approve. Promotion is the one place you accept changes one by one: it proposes changes to a shared wiki.</p>
+        <h3>Notes and Sessions: capture</h3>
         <ol>
-          <li>WikiApp builds an <strong>index</strong> of your wikis and gives Claude its instructions, the index and your notes.</li>
-          <li>Claude works through the notes in a <strong>loop</strong>: it decides what it needs, reads a page with its <em>Read a page</em> tool, looks at what it found (following links to other pages when needed), and repeats.</li>
-          <li>When it knows what should change on a page, it uses its <em>Propose a change</em> tool. Each proposal appears here as a <strong>card</strong>.</li>
+          <li>Notes lists your wrapped notes that are new, or that you edited after they were captured. Sessions lists your recent Claude Code sessions.</li>
+          <li>Press <strong>Capture</strong> (or Ingest). Claude reads the note or session and writes a short record of what was decided and found, filed under a topic page in your personal wiki. A tag it has to invent is added to your personal tags.</li>
+          <li>It is written straight away, and only ever into your personal wiki. A note or session that hasn't changed since its capture is never sent again.</li>
+        </ol>
+        <h3>Review</h3>
+        <p>When enough new sessions or notes have landed on a topic, the wiki reviewer rewrites the page's summary of where the work stands and its Related section. When a note and a session disagree, the conflict is held here for you: <strong>Keep note</strong>, <strong>Accept session</strong> (the topic page takes the session's version), or <strong>Dismiss</strong>.</p>
+        <h3>Promotion: cards you accept</h3>
+        <ol>
+          <li>WikiApp builds an <strong>index</strong> of your wikis and gives Claude its instructions, the index and the pages you chose.</li>
+          <li>Claude works through them in a <strong>loop</strong>: it decides what it needs, reads a page with its <em>Read a page</em> tool, looks at what it found, and repeats.</li>
+          <li>When it knows what should change on a team wiki page, it uses its <em>Propose a change</em> tool. Each proposal appears here as a <strong>card</strong>.</li>
           <li>You answer every card: ✓ to write the change, ✗ to drop it, or ↻ to give Claude feedback. Nothing happens until you press <strong>Submit</strong>.</li>
           <li>Submit writes the ✓ changes. Cards with feedback go back to Claude together, and its revisions come back as cards to answer again.</li>
-          <li>When every card is handled, the notes are marked as ingested and leave the list.</li>
+          <li>When every card is handled, the promoted pages are marked and leave the list.</li>
         </ol>
+        ${diagram()}
         <h3>Words you'll see</h3>
         <dl class="ingest-terms">
           <dt>Agent</dt><dd>Claude working on a task in steps on its own: reading, deciding and acting, rather than answering one question.</dd>
           <dt>Agent loop</dt><dd>The agent's routine: think about what it needs, use a tool, look at the result, and go again until the task is done.</dd>
           <dt>Tool</dt><dd>An action the agent is allowed to take. Here it has exactly two: <em>Read a page</em> and <em>Propose a change</em>. It can't write, delete, browse the web or open any other file.</dd>
-          <dt>Model</dt><dd>Which Claude does the work, picked next to the Ingest button. The list comes from your Claude Code sign-in. Haiku 5.5, the default, is the cheapest and does this job well; larger models cost more per run.</dd>
+          <dt>Model</dt><dd>Which Claude does the work, picked next to each tab's button, and also in Settings (they are the same setting). The list comes from your Claude Code sign-in. Larger models cost more per run.</dd>
           <dt>Claude Agent SDK</dt><dd>The ready-made building block (a "software development kit") that runs the agent loop on your computer. It uses the Claude Code engine and your existing Claude Code sign-in, so there is no separate account or key.</dd>
-          <dt>Prompt</dt><dd>The written instructions Claude gets at the start: WikiApp's built-in instructions, your notes and each wiki's rules. Change your notes and the rules with <em>Edit ingestion prompt</em>.</dd>
+          <dt>Prompt</dt><dd>The written instructions Claude gets at the start: the agent's own prompt, a shared guide to writing tasks, and each wiki's rules. See and change them with <em>Agents and rules</em>, above the tabs.</dd>
           <dt>Feedback</dt><dd>A note you write on a card (its ↻ button). On Submit, all the feedback goes to Claude in one message, with which cards you accepted and rejected. It continues the same conversation, so Claude still knows everything it read, and it revises those cards (or explains why not). It counts toward the same run's cost.</dd>
-          <dt>Index</dt><dd>A one-line summary of every page (name, description, tags, sections, links), rebuilt each time you press Ingest, so Claude knows what exists without reading every page.</dd>
+          <dt>Index</dt><dd>A one-line summary of every page (name, description, tags, sections, links), rebuilt each time you press Promote, so Claude knows what exists without reading every page.</dd>
           <dt>Card</dt><dd>One proposed change to one page, in that wiki's color. A new page shows a preview and lets you pick its folder.</dd>
           <dt>Tokens and cost</dt><dd>Claude reads and writes text in small pieces called tokens, and cost is counted in them. After each run you see what it used, next to an estimate for the same work in a plain Claude Code session, which sends a lot more with every step (all its built-in tools, a long system prompt and its skills list).</dd>
         </dl>
@@ -234,7 +277,7 @@ export function createIngestDialogs(backdrop, {
     const name = (id) => id.slice(id.indexOf(':') + 1).replace(/\.md$/i, '');
 
     const upFront = [
-      ['System prompt (agent prompt, your notes, wiki rules)', context.systemPrompt],
+      ['System prompt (the agent\'s prompt, the task guide, wiki rules)', context.systemPrompt],
       ...Object.entries(context.indexes || {}).map(([alias, k]) => [`Index of ${alias}`, k]),
       ...Object.entries(context.notes || {}).map(([id, k]) => [`Note: ${name(id)}`, k]),
     ];
@@ -316,7 +359,7 @@ const PLAIN_TOOLTIP =
 // The agent, its loop and its two tools, between your notes and your pages.
 function diagram() {
   return `
-    <svg class="ingest-diagram" viewBox="0 0 760 300" role="img" aria-label="Your notes go to Claude, which loops using two tools: read a page, and propose a change. Proposals become cards; accepting one writes it to your wiki.">
+    <svg class="ingest-diagram" viewBox="0 0 760 300" role="img" aria-label="Your chosen pages go to Claude, which loops using two tools: read a page, and propose a change. Proposals become cards; accepting one writes it to your wiki.">
       <defs>
         <marker id="ingest-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 10 5 0 10z" class="d-arrowhead"/>
@@ -329,7 +372,7 @@ function diagram() {
       <text x="85" y="124" class="d-title">What Claude gets</text>
       <text x="85" y="148" class="d-text">Instructions</text>
       <text x="85" y="168" class="d-text">Index of pages</text>
-      <text x="85" y="188" class="d-text">Your notes</text>
+      <text x="85" y="188" class="d-text">Chosen pages</text>
       <path d="M160 150H222" class="d-line" marker-end="url(#ingest-arrow)"/>
 
       <path d="M246 104C252 40 330 40 336 104" class="d-loop" marker-end="url(#ingest-arrow)"/>
@@ -348,7 +391,7 @@ function diagram() {
       <text x="485" y="228" class="d-text">Propose a change</text>
 
       <rect x="600" y="50" width="150" height="76" rx="10" class="d-box"/>
-      <text x="675" y="80" class="d-title">Your wiki pages</text>
+      <text x="675" y="80" class="d-title">Team wiki pages</text>
       <text x="675" y="102" class="d-text">read, never written</text>
       <path d="M600 88H562" class="d-line" marker-end="url(#ingest-arrow)"/>
 

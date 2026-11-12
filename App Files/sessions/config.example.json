@@ -1,0 +1,18 @@
+{
+  "personal_wiki": "C:/path/to/your/personal-wiki",
+  "team_wiki": "C:/path/to/your/team-wiki",
+  "transcripts_dir": "~/.claude/projects",
+  "claude_cmd": "claude",
+  "claude_extra_args": ["--strict-mcp-config"],
+  "extract_model": "claude-haiku-5-5",
+  "review_model": "claude-sonnet-5-5",
+  "capture_thinking": false,
+  "review_thinking": true,
+  "lookback_days": 14,
+  "review_after_entries": 3,
+  "folder_after_topics": 3,
+  "min_user_messages": 2,
+  "max_transcript_chars": 160000,
+  "llm_timeout_seconds": 300,
+  "exclude_project_patterns": ["AppData-Local-Temp"]
+}

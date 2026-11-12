@@ -1,5 +1,5 @@
 # Draws the app icon (a small graph on a dark tile) and writes app.ico with all the
-# sizes Windows uses. Edit the colors/shapes below and run build.cmd to apply it.
+# sizes Windows uses. Edit the colors/shapes below, run this script, and restart the app.
 # To use your own artwork instead, just replace app.ico with any .ico file.
 
 Add-Type -AssemblyName System.Drawing

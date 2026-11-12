@@ -8,3 +8,9 @@ Share/
 *.lnk
 # Wiki content kept next to the app: it's data, not part of the app.
 Sample Wikis/
+# WikiApp's private folder (settings, prompts, progress), suggested right here on the first start.
+# It belongs to one person: never committed, and a git pull never touches it.
+.wiki/
+# Environment files and local Claude Code settings.
+.env*
+.claude/settings.local.json

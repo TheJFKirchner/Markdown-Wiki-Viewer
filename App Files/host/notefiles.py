@@ -1,6 +1,5 @@
 """The open folders on disk: scanning them, reading a file, the only code that writes notes, and
-watching for changes. A port of the Vault and NoteFiles classes in WikiApp.cs; the page sees the
-same results from either host.
+watching for changes.
 
 Writes only touch .md files inside a folder the page names, keep the file's line endings and BOM,
 and refuse to edit lines that changed since the page read them.

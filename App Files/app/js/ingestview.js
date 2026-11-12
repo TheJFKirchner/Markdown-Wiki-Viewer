@@ -1,14 +1,22 @@
-// The Ingest view: wrapped quick notes that haven't been ingested yet, the model menu and a
-// button that sends the chosen notes to the ingest agent (ingest/run.py, started by the host),
-// its progress, and one card per page the agent proposes to change. Each card gets an answer
+// The Ingest view's Promotion tab (the Notes tab is capturenotes.js, which writes straight into the
+// personal wiki). Choose pages, press Promote (ingest/run.py, started by the host): the agent proposes one
+// card per page it would change. Each card gets an answer
 // (✓ write it, ✗ drop it, ↻ feedback for Claude) and nothing happens until Submit: then the ✓
 // changes are written and all the feedback goes back to Claude in one round. Cards (with their
-// answers) wait in the app's data folder (ingest/pending.json) until every one is handled; then
-// the run's notes get `ingested: <date>`. See ingest/DESIGN.md.
+// answers) wait in the app's data folder (ingest/pending-promotion.json) until every one is handled. See ingest/DESIGN.md.
+//
+// Promotion (the team wiki manager) lists:
+// the personal wiki's topic pages and folder pages, and its promotion queue of data findings.
+// A topic has to be reviewed (the Review tab) since it last changed before it can be promoted.
+// Before it proposes anything, the team wiki manager may ask up to five questions (mostly: where
+// should this go?). They show as a form above the cards; the answers continue the same run. Changes may
+// only be proposed in the other wikis, and a promoted page gets `promoted: <date>` (the queue's
+// lines get ticked) so it leaves the list until it changes again.
 
 import { parseFrontmatter, normalizeTags, parseLink, resolveTarget } from './vault.js';
-import { noteInfo, parseNote, withProperties, TEMPLATES_DIR } from './notes.js';
+import { parseNote, withProperties, TEMPLATES_DIR } from './notes.js';
 import { isoDate } from './tasks.js';
+import { chosenModel as chosenModelFor, modelMenu as sharedModelMenu, rememberModel } from './modelmenu.js';
 
 const WIKILINK = /\[\[([^[\]\n]+?)\]\]/g;
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -21,7 +29,23 @@ const PLAIN_HINT =
 const API_PRICE_HINT =
   'What this run\'s tokens would cost at Claude API list prices. On a Claude subscription a run is not billed per token: it counts toward your plan\'s usage.';
 // Used until the host has listed Claude Code's models (ingest/models.py), and as the default.
-const DEFAULT_MODEL = { id: 'claude-haiku-5-5', name: 'Haiku 5.5', description: 'Fastest for quick answers' };
+// Promotion rewrites shared pages, which is worth a stronger model.
+const PROMOTION_MODEL = { id: 'claude-sonnet-5-5', name: 'Sonnet 5.5', description: 'Best for careful rewriting' };
+const QUEUE_FILE = 'promotion-queue.md';
+const day = (v) => (v instanceof Date ? v.toISOString() : String(v ?? '')).slice(0, 10);
+// A time as text that sorts in time order: a page's `changed` (written by sessions/sb.py) against its `promoted`.
+const stamp = (v) => (v instanceof Date ? v.toISOString() : String(v ?? ''));
+const TEXT = {
+  promotion: {
+    title: 'Promotion', button: 'Promote', model: PROMOTION_MODEL,
+    intro: 'Pages in your personal wiki that could be shared: topic pages, folders, and the queue of data findings your sessions turned up. A topic must be reviewed in the Review tab before it can be promoted. Choose what to send to the team wiki manager: it proposes changes to the team wiki. Nothing is written there until you answer ✓ and press Submit.',
+    empty: 'Nothing is waiting. Topic pages appear here once sessions are ingested, and again whenever they change after being promoted.',
+    select: 'Select the pages to promote.',
+    doneHint: 'When every card is handled, these pages are marked as promoted.',
+    failHint: 'Review any cards it made; the pages stay in the list.',
+    marked: (n) => `${plural(n, 'page')} marked promoted`,
+  },
+};
 // A card's answer buttons: [answer, icon, tooltip].
 const ANSWERS = [
   ['accept', '✓', 'Accept: write this change when you submit'],
@@ -31,6 +55,12 @@ const ANSWERS = [
 
 export function createIngestView(container, deps) {
   const { call, on, getVault, getFolders, findFolder, getNotesDir, reload, render, openPage, toast, onChange, onHelp, onEditPrompt, onShowRun } = deps;
+  const promotion = true; // (this view only does Promotion now)
+  const stateName = 'promotion'; // which saved cards are this tab's
+  const T = TEXT[stateName];
+  const getSourceWiki = deps.getSourceWiki || (() => null); // promotion: the personal wiki's folder
+  // Promotion: the wikis changes may be proposed in (every folder but the personal wiki).
+  const targets = () => getFolders().filter((f) => f.alias !== getSourceWiki()?.alias).map((f) => f.alias);
   let info = { ready: false, running: false };
   let state = { run: null, cards: [], last: null };
   let pastRuns = []; // [{ runId, transcript (parsed, or null) }], newest first
@@ -49,6 +79,19 @@ export function createIngestView(container, deps) {
   container.addEventListener('change', onSelectChange);
   // Feedback being typed is kept on its card (card.draft), so a redraw or a restart keeps it.
   container.addEventListener('input', (e) => {
+    // An answer being typed is kept on its question, without a redraw (the cursor stays put).
+    const question = e.target.dataset.qAnswer && (state.run?.questions || []).find((q) => q.id === e.target.dataset.qAnswer);
+    if (question) {
+      question.answer = e.target.value;
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(save, 600);
+      const missing = pendingQuestions().filter((q) => !answered(q)).length;
+      const send = container.querySelector('[data-action="q-send"]');
+      if (send) send.disabled = Boolean(missing);
+      const status = container.querySelector('.ingest-q-footer .ingest-submit-status');
+      if (status) status.textContent = missing ? `${missing} still ${missing === 1 ? 'needs' : 'need'} an answer or a skip` : 'Ready: Claude will propose the changes next.';
+      return;
+    }
     const card = e.target.dataset.feedback && state.cards.find((c) => c.id === e.target.dataset.feedback);
     if (!card) return;
     card.draft = e.target.value;
@@ -72,7 +115,7 @@ export function createIngestView(container, deps) {
 
   async function load() {
     try {
-      info = await call('ingestInfo');
+      info = await call('ingestInfo', { name: stateName });
     } catch (err) {
       info = { ready: false, running: false, error: err.message };
     }
@@ -112,20 +155,8 @@ export function createIngestView(container, deps) {
     }
   }
 
-  function chosenModel() {
-    return localStorageGet('ingestModel') || DEFAULT_MODEL.id;
-  }
-
-  function modelList() {
-    let list = [];
-    try {
-      list = JSON.parse(localStorageGet('ingestModels') || '[]');
-    } catch { /* a damaged list: use the default */ }
-    if (!Array.isArray(list) || !list.length) list = [DEFAULT_MODEL];
-    const chosen = chosenModel();
-    if (!list.some((m) => m.id === chosen)) list = [...list, { id: chosen, name: chosen, description: 'Not offered by Claude Code right now' }];
-    return list;
-  }
+  // The model comes from the engine settings (modelmenu.js), the same one Settings shows.
+  const chosenModel = () => chosenModelFor('team-wiki-manager', T.model);
 
   // The run folders' transcripts, for the Past runs list.
   async function loadRuns() {
@@ -149,7 +180,7 @@ export function createIngestView(container, deps) {
     clearTimeout(saveTimer);
     const text = JSON.stringify(state);
     saving = saving
-      .then(() => call('saveIngestState', { state: text }))
+      .then(() => call('saveIngestState', { state: text, name: stateName }))
       .catch((err) => toast(`Couldn't save the Ingest cards: ${err.message}`));
   }
 
@@ -157,13 +188,35 @@ export function createIngestView(container, deps) {
 
   // Wrapped quick notes without `ingested:` in their frontmatter, newest first.
   function waiting() {
-    if (!vault) return [];
+    return promotable();
+  }
+
+  // Promotion's list: the personal wiki's topic and folder pages that changed since they were
+  // last promoted (all of them with Show already promoted), and its promotion queue while it has
+  // findings waiting. The queue comes first.
+  const isQueue = (note) => note.path.toLowerCase() === QUEUE_FILE;
+  let showPromoted = false;
+  const promotedAlready = (p) => Boolean(p.promoted) && !(stamp(p.promoted) < stamp(p.changed ?? p.updated));
+  // A topic can be promoted only once the wiki reviewer has rewritten its summary since its last change.
+  const needsReview = (note) => promotion && note.properties?.type === 'topic'
+    && !(note.properties.state_as_of && !note.properties.needs_review && !Number(note.properties.entries_since_review));
+  function promotable() {
+    const source = getSourceWiki();
+    if (!vault || !source) return [];
     return [...vault.notes.values()]
-      .filter((n) => n.inbox && !n.template && noteInfo(n).wrapped && !n.properties?.ingested)
-      .sort((a, b) => (noteInfo(b).ended || noteInfo(b).started).localeCompare(noteInfo(a).ended || noteInfo(a).started) || a.name.localeCompare(b.name));
+      .filter((n) => {
+        if (n.folder !== source.alias) return false;
+        if (isQueue(n)) return /^- \[ \] /m.test(n.content);
+        const p = n.properties || {};
+        return (p.type === 'topic' || p.type === 'folder') && (showPromoted || !promotedAlready(p));
+      })
+      .sort((a, b) => isQueue(b) - isQueue(a) || day(b.properties?.updated).localeCompare(day(a.properties?.updated)) || a.name.localeCompare(b.name));
   }
 
   const openCards = () => state.cards.filter((c) => c.status === 'open');
+  // A promotion's questions from the agent that haven't been answered and sent back yet.
+  const pendingQuestions = () => (state.run?.questions || []).filter((q) => !q.sent);
+  const answered = (q) => q.skip || Boolean((q.answer || '').trim());
   const running = () => state.run?.status === 'running';
   // Cards Claude is revising now. (A round from before answers were submitted together has `card`.)
   const revisingIds = () => {
@@ -189,8 +242,11 @@ export function createIngestView(container, deps) {
   function blocker(count) {
     if (!info.ready) return 'Ingest needs a one-time setup first.';
     if (running()) return 'A run is going.';
+    if (pendingQuestions().length) return 'Answer Claude\'s questions first.';
     if (openCards().length) return `Answer the ${plural(openCards().length, 'proposed change')} and submit first.`;
-    if (!count) return 'Select the notes to ingest.';
+    if (promotion && !getSourceWiki()) return 'Choose your personal wiki in the Sessions tab first.';
+    if (promotion && !targets().length) return 'Add your team wiki\'s folder to the workspace first.';
+    if (!count) return T.select;
     return '';
   }
 
@@ -204,7 +260,7 @@ export function createIngestView(container, deps) {
     const typing = active?.dataset?.feedback && { id: active.dataset.feedback, start: active.selectionStart, end: active.selectionEnd };
     const scroll = container.querySelector('.ingest-right')?.scrollTop || 0;
     const notes = waiting();
-    for (const id of [...selected]) if (!notes.some((n) => n.id === id)) selected.delete(id);
+    for (const id of [...selected]) if (!notes.some((n) => n.id === id && !needsReview(n))) selected.delete(id);
     const count = selected.size;
     const why = blocker(count);
     const cards = state.cards.filter((c) => c.status === 'open' || busy.has(c.id));
@@ -213,20 +269,18 @@ export function createIngestView(container, deps) {
       <div class="ingest">
         <section class="ingest-left">
           <header class="ingest-header">
-            <h1>Ingest</h1>
-            <span class="spacer"></span>
-            <button class="secondary-button ingest-help" data-action="help" title="How Ingest works">?</button>
-            <button class="secondary-button" data-action="prompt">✎ Edit ingestion prompt</button>
+            <h1>${T.title}</h1>
           </header>
-          <p class="ingest-intro">Wrapped notes that haven't been ingested yet. Choose the ones to send to Claude: it proposes changes to your wiki pages. On the right, answer each change (✓ write it, ✗ drop it, ↻ feedback for Claude), then press Submit.</p>
+          <p class="ingest-intro">${esc(T.intro)}</p>
           ${info.ready ? '' : setupBox()}
-          <div class="ingest-list">${notes.length ? notes.map(noteRow).join('') : '<p class="ingest-empty">No wrapped notes are waiting. Wrap a note in the Notes view and it appears here.</p>'}</div>
+          <div class="ingest-list">${notes.length ? notes.map(noteRow).join('') : `<p class="ingest-empty">${esc(blocker(1) && promotion && (!getSourceWiki() || !targets().length) ? blocker(1) : T.empty)}</p>`}</div>
           <div class="ingest-actions">
-            ${notes.length ? `<button class="link-button" data-action="all">${count === notes.length ? 'Select none' : 'Select all'}</button>` : ''}
+            ${notes.length ? `<button class="link-button" data-action="all">${count && count === notes.filter((n) => !needsReview(n)).length ? 'Select none' : 'Select all'}</button>` : ''}
+            ${promotion ? `<label class="ingest-check" style="margin:0" title="Also list pages that haven't changed since they were promoted, to send one again"><input type="checkbox" data-action="show-promoted" ${showPromoted ? 'checked' : ''}> Show already promoted</label>` : ''}
             <span class="spacer"></span>
             <span class="ingest-why">${esc(why && count ? why : '')}</span>
             ${modelMenu()}
-            <button class="primary-button" data-action="start" ${why ? 'disabled' : ''}>Ingest ${count || ''}</button>
+            <button class="primary-button" data-ai data-action="start" ${why ? 'disabled' : ''}>${T.button} ${count || ''}</button>
           </div>
           ${progress()}
           ${pastRunsList()}
@@ -236,6 +290,7 @@ export function createIngestView(container, deps) {
             <h2>Proposed changes</h2>
             <span class="ingest-count">${openCards().length ? `${openCards().length} to review` : ''}</span>
           </header>
+          ${questionsBox()}
           <div class="ingest-cards"></div>
           <footer class="ingest-submit" hidden></footer>
         </section>
@@ -252,6 +307,57 @@ export function createIngestView(container, deps) {
       box.focus();
       box.setSelectionRange(typing.start, typing.end);
     }
+  }
+
+  // A promotion's questions from the team wiki manager: one box each, with the places it is
+  // choosing between as buttons, and a way to skip. Once sent, they fold into a short record.
+  function questionsBox() {
+    const all = state.run?.questions || [];
+    if (!all.length) return '';
+    const pending = pendingQuestions();
+    if (!pending.length) {
+      return `<details class="ingest-questions sent"><summary>Your answers to ${plural(all.length, 'question')}</summary>
+        ${all.map((q) => `<div class="ingest-question"><p class="ingest-q-about">${esc(q.about)}</p><p>${esc(q.question)}</p>
+          <p class="ingest-q-given">${q.skip ? 'Skipped: left out.' : esc(q.answer)}</p></div>`).join('')}</details>`;
+    }
+    const missing = pending.filter((q) => !answered(q)).length;
+    return `
+      <section class="ingest-questions">
+        <h3>Before it proposes anything, Claude has ${plural(pending.length, 'question')}</h3>
+        <p class="ingest-q-intro">Answer in a few words, pick one of the places it suggests, or skip a question to leave that point out of the team wiki.</p>
+        ${pending.map((q) => `
+          <div class="ingest-question${q.skip ? ' skipped' : ''}" data-question="${esc(q.id)}">
+            <p class="ingest-q-about">${esc(q.about)}</p>
+            <p class="ingest-q-text">${esc(q.question)}</p>
+            ${(q.options || []).length ? `<div class="ingest-q-options">${q.options.map((o) => `<button class="secondary-button${q.answer === o ? ' chosen' : ''}" data-action="q-option" data-value="${esc(o)}" ${q.skip ? 'disabled' : ''}>${esc(o)}</button>`).join('')}</div>` : ''}
+            <textarea rows="2" data-q-answer="${esc(q.id)}" placeholder="Your answer" ${q.skip ? 'disabled' : ''}>${esc(q.answer || '')}</textarea>
+            <label class="ingest-check"><input type="checkbox" data-q-skip="${esc(q.id)}" ${q.skip ? 'checked' : ''}> Skip: leave this point out</label>
+          </div>`).join('')}
+        <footer class="ingest-q-footer">
+          <span class="ingest-submit-status">${missing ? `${missing} still ${missing === 1 ? 'needs' : 'need'} an answer or a skip` : 'Ready: Claude will propose the changes next.'}</span>
+          <button class="primary-button" style="margin:0" data-action="q-send" ${missing ? 'disabled' : ''}>Continue</button>
+        </footer>
+      </section>`;
+  }
+
+  // Sends the answers back: the same run continues, and the agent proposes its cards.
+  async function sendAnswers() {
+    const run = state.run;
+    const pending = pendingQuestions();
+    if (!run || running() || !pending.length || pending.some((q) => !answered(q))) return;
+    const answers = Object.fromEntries(run.questions.map((q) => [q.id, q.skip ? '' : (q.answer || '').trim()]));
+    try {
+      await call('answerIngestQuestions', { runId: run.id, answers });
+    } catch (err) {
+      toast(`Couldn't send the answers: ${err.message}`);
+      return;
+    }
+    for (const q of run.questions) q.sent = true;
+    run.status = 'running';
+    run.stage = 'Claude is using your answers';
+    save();
+    draw();
+    onChange();
   }
 
   // The Submit bar under the cards: how many still need an answer, or what Submit will do.
@@ -279,19 +385,7 @@ export function createIngestView(container, deps) {
         title="${missing ? 'Answer every card first: ✓, ✗ or ↻ with feedback' : 'Write the accepted changes and send the feedback (Ctrl+Enter in a feedback box)'}">${submitting ? 'Submitting…' : 'Submit'}</button>`;
   }
 
-  function modelMenu() {
-    const chosen = chosenModel();
-    const list = modelList();
-    const current = list.find((m) => m.id === chosen);
-    const label = (m) => `${m.name}${m.id === DEFAULT_MODEL.id ? ' (default)' : ''}`;
-    return `
-      <label class="ingest-model" title="${esc(`The model for the next run: ${chosen}${current?.description ? ` · ${current.description}` : ''}`)}">
-        <span>Model</span>
-        <select data-action="model" ${running() ? 'disabled' : ''}>
-          ${list.map((m) => `<option value="${esc(m.id)}" title="${esc(`${m.id}${m.description ? ` · ${m.description}` : ''}`)}" ${m.id === chosen ? 'selected' : ''}>${esc(label(m))}</option>`).join('')}
-        </select>
-      </label>`;
-  }
+  const modelMenu = () => sharedModelMenu({ agent: 'team-wiki-manager', fallback: T.model, disabled: running(), what: 'the next run' });
 
   function setupBox() {
     return `
@@ -305,14 +399,20 @@ export function createIngestView(container, deps) {
 
   function noteRow(note) {
     const folder = findFolder(note.folder);
-    const { type, started, ended } = noteInfo(note);
-    return `
-      <label class="ingest-note">
-        <input type="checkbox" data-id="${esc(note.id)}" ${selected.has(note.id) ? 'checked' : ''} ${running() ? 'disabled' : ''}>
-        <button class="link-button ingest-note-name" data-action="open" data-id="${esc(note.id)}">${esc(note.name)}</button>
-        <span class="wiki-chip" style="--wiki:${esc(folder?.color || 'var(--text-faint)')}">${esc(note.folder)}</span>
-        <span class="ingest-note-meta">${esc(type)}${ended || started ? ` · wrapped ${esc(ended || started)}` : ''}</span>
-      </label>`;
+    if (promotion) {
+      const p = note.properties || {};
+      const findings = (note.content.match(/^- \[ \] /gm) || []).length;
+      const meta = isQueue(note)
+        ? `${plural(findings, 'data finding')} from your sessions`
+        : [p.type, p.folder && `in ${p.folder}`, needsReview(note) ? 'review it first, in the Review tab' : p.promoted ? (promotedAlready(p) ? `promoted ${day(p.promoted)}` : `changed since promoted ${day(p.promoted)}`) : `updated ${day(p.updated)}`].filter(Boolean).join(' · ');
+      return `
+        <label class="ingest-note" title="${esc(typeof p.summary === 'string' ? p.summary : '')}">
+          <input type="checkbox" data-id="${esc(note.id)}" ${selected.has(note.id) ? 'checked' : ''} ${running() || needsReview(note) ? 'disabled' : ''}>
+          <button class="link-button ingest-note-name" data-action="open" data-id="${esc(note.id)}">${esc(isQueue(note) ? 'Promotion queue' : p.title || note.name)}</button>
+          <span class="wiki-chip" style="--wiki:${esc(folder?.color || 'var(--text-faint)')}">${esc(note.folder)}</span>
+          <span class="ingest-note-meta">${esc(meta)}</span>
+        </label>`;
+    }
   }
 
   function progress() {
@@ -331,9 +431,9 @@ export function createIngestView(container, deps) {
       const ok = run.status === 'done';
       return `
         <div class="ingest-progress ${ok ? 'done' : 'failed'}">
-          <div class="ingest-stage">${ok ? `Done: ${plural(proposed, 'change')} proposed after reading ${plural(run.reads.length, 'page')}.` : `The run stopped: ${esc(run.message)}`}</div>
+          <div class="ingest-stage">${ok ? (pendingQuestions().length ? `Claude read ${plural(run.reads.length, 'page')} and has ${plural(pendingQuestions().length, 'question')} for you, on the right.` : `Done: ${plural(proposed, 'change')} proposed after reading ${plural(run.reads.length, 'page')}.`) : `The run stopped: ${esc(run.message)}`}</div>
           ${costLine(run)}
-          <div class="ingest-stats">${ok ? 'When every card is handled, these notes are marked as ingested.' : 'Review any cards it made; the notes stay in the list.'}
+          <div class="ingest-stats">${ok ? T.doneHint : T.failHint}
             <span class="spacer"></span><button class="link-button" data-action="folder" data-run="${esc(run.id)}">Open run folder</button></div>
         </div>`;
     }
@@ -398,7 +498,7 @@ export function createIngestView(container, deps) {
           : ANSWERS.map(([a, icon, title]) => `<button class="ingest-answer${card.decision === a ? ' chosen' : ''}" data-action="decide" data-decision="${a}"
               title="${title}" aria-label="${title}" aria-pressed="${card.decision === a}" ${locked ? 'disabled' : ''}>${icon}</button>`).join('')}
       </header>
-      ${stale ? `<p class="ingest-stale">${card.kind === 'edit' ? 'Page changed since this was proposed.' : 'A page with this name exists now.'} Dismiss it; its notes stay in the list so they can be ingested again.</p>` : ''}
+      ${stale ? `<p class="ingest-stale">${card.kind === 'edit' ? 'Page changed since this was proposed.' : 'A page with this name exists now.'} Dismiss it; what it came from stays in the list, to run again.</p>` : ''}
       ${stale ? '' : feedbackParts(card, revising)}
       <p class="ingest-summary">${esc(card.summary)}</p>
       <p class="ingest-from">From ${esc(fromNotes)}</p>
@@ -519,7 +619,7 @@ export function createIngestView(container, deps) {
       openPage(button.dataset.id);
     } else if (action === 'page') openPage(button.dataset.id);
     else if (action === 'all') {
-      const notes = waiting();
+      const notes = waiting().filter((n) => !needsReview(n));
       if (selected.size === notes.length) selected.clear();
       else for (const n of notes) selected.add(n.id);
       draw();
@@ -531,6 +631,15 @@ export function createIngestView(container, deps) {
     else if (action === 'run') {
       const run = pastRuns.find((r) => r.runId === button.dataset.run);
       if (run?.transcript) onShowRun(run.transcript, runTime(run.runId));
+    }
+    else if (action === 'q-option' || action === 'q-send') {
+      const q = (state.run?.questions || []).find((x) => x.id === button.closest('[data-question]')?.dataset.question);
+      if (action === 'q-send') sendAnswers();
+      else if (q) {
+        q.answer = q.answer === button.dataset.value ? '' : button.dataset.value;
+        save();
+        draw();
+      }
     }
     else if (card && action === 'decide') decide(card, button.dataset.decision);
     else if (action === 'submit') submit();
@@ -546,8 +655,15 @@ export function createIngestView(container, deps) {
   }
 
   function onSelectChange(e) {
-    if (e.target.matches('select[data-action="model"]')) {
-      localStorageSet('ingestModel', e.target.value);
+    if (rememberModel(e)) {
+      draw();
+    } else if (e.target.dataset.qSkip) {
+      const q = (state.run?.questions || []).find((x) => x.id === e.target.dataset.qSkip);
+      if (q) q.skip = e.target.checked;
+      save();
+      draw();
+    } else if (e.target.matches('[data-action="show-promoted"]')) {
+      showPromoted = e.target.checked;
       draw();
     } else if (e.target.matches('.ingest-note input[type=checkbox]')) {
       if (e.target.checked) selected.add(e.target.dataset.id);
@@ -564,7 +680,7 @@ export function createIngestView(container, deps) {
   }
 
   async function startRun() {
-    const ids = waiting().map((n) => n.id).filter((id) => selected.has(id));
+    const ids = waiting().filter((n) => !needsReview(n)).map((n) => n.id).filter((id) => selected.has(id));
     if (blocker(ids.length)) return;
     const job = {
       date: isoDate(),
@@ -572,16 +688,20 @@ export function createIngestView(container, deps) {
       wikis: getFolders().map((f) => ({ alias: f.alias, root: f.root })),
       notes: ids,
       settings: { logRaw: localStorageGet('ingestLogRaw') === 'true', model: chosenModel() },
+      ...(promotion ? { agent: 'team-wiki-manager', targets: targets() } : {}),
     };
+    // The queue's findings as they are now: the ones this run saw are ticked when it's done.
+    const queue = promotion && ids.map((id) => vault.notes.get(id)).find((n) => n && isQueue(n));
+    const queueLines = queue ? queue.content.split(/\r?\n/).filter((line) => line.startsWith('- [ ] ')) : [];
     try {
       const runId = await call('startIngest', { job });
-      state.run = { id: runId, notes: ids, status: 'running', stage: 'Starting', reads: [], started: new Date().toISOString() };
+      state.run = { id: runId, notes: ids, queueLines, status: 'running', stage: 'Starting', reads: [], started: new Date().toISOString() };
       state.cards = [];
       save();
       draw();
       onChange();
     } catch (err) {
-      toast(`Ingest didn't start: ${err.message}`);
+      toast(`${T.title} didn't start: ${err.message}`);
     }
   }
 
@@ -686,17 +806,17 @@ export function createIngestView(container, deps) {
   // failed, or one of a note's cards was dismissed because its page changed), and clear it.
   async function checkFinish() {
     const run = state.run;
-    if (!run || run.status === 'running' || finishing || submitting || busy.size || openCards().length || !vault) return;
+    if (!run || run.status === 'running' || finishing || submitting || busy.size || openCards().length || pendingQuestions().length || !vault) return;
     finishing = true;
     const count = (status) => state.cards.filter((c) => c.status === status).length;
     let marked = [];
     if (run.status === 'done') {
       const blocked = new Set(state.cards.filter((c) => c.status === 'dismissed').flatMap((c) => c.fromNotes));
-      marked = await markIngested(run.notes.filter((id) => !blocked.has(id)));
+      marked = await markIngested(run.notes.filter((id) => !blocked.has(id)), run.queueLines || []);
     }
     const parts = [`${plural(state.cards.length, 'change')} proposed`];
     if (state.cards.length) parts.push(`${count('accepted')} accepted, ${count('rejected')} rejected${count('dismissed') ? `, ${count('dismissed')} dismissed` : ''}`);
-    parts.push(run.status === 'done' ? `${plural(marked.length, 'note')} marked ingested` : `stopped: ${run.message}`);
+    parts.push(run.status === 'done' ? T.marked(marked.length) : `stopped: ${run.message}`);
     state.last = { id: run.id, ok: run.status === 'done', text: parts.join(' · '), cost: run.cost, plain: run.plain, tokens: run.tokens };
     state.run = null;
     state.cards = [];
@@ -707,8 +827,9 @@ export function createIngestView(container, deps) {
     onChange();
   }
 
-  // Adds `ingested: <today>` to each note's frontmatter. -> ids that were marked.
-  async function markIngested(ids) {
+  // Adds `ingested: <today>` to each note's frontmatter (a promoted page gets `promoted:`, and
+  // the promotion queue has the findings the run saw ticked). -> ids that were marked.
+  async function markIngested(ids, queueLines = []) {
     const done = [];
     const folders = new Set();
     for (const id of ids) {
@@ -717,11 +838,15 @@ export function createIngestView(container, deps) {
       if (!folder) continue;
       const front = parseNote(note.content).front;
       try {
-        await call('editLines', { root: folder.root, path: note.path, start: 0, expect: front, replace: withProperties(front, { ingested: isoDate() }) });
+        if (promotion && isQueue(note)) {
+          const lines = note.content.split(/\r?\n/);
+          const seen = new Set(queueLines);
+          await call('editLines', { root: folder.root, path: note.path, start: 0, expect: lines, replace: lines.map((l) => (seen.has(l) ? l.replace('- [ ] ', '- [x] ') : l)) });
+        } else await call('editLines', { root: folder.root, path: note.path, start: 0, expect: front, replace: withProperties(front, promotion ? { promoted: new Date().toISOString() } : { ingested: isoDate() }) });
         done.push(id);
         folders.add(note.folder);
       } catch (err) {
-        toast(`Couldn't mark ${note.name} as ingested: ${err.message}`);
+        toast(`Couldn't mark ${note.name} as ${promotion ? 'promoted' : 'ingested'}: ${err.message}`);
       }
     }
     for (const alias of folders) await reload(alias);
@@ -752,6 +877,9 @@ export function createIngestView(container, deps) {
         card.pendingFeedback = state.cards[at].pendingFeedback;
         state.cards[at] = card;
       } else state.cards.push(card);
+    } else if (event.type === 'questions') {
+      // A promotion: the agent asks before it proposes. The run ends here and waits for the answers.
+      run.questions = (event.questions || []).map((q) => ({ ...q, answer: '', skip: false, sent: false }));
     } else if (event.type === 'reply') {
       const revised = Array.isArray(event.revised) ? event.revised : event.revised ? [event.card] : [];
       run.reply = { text: event.text, revised };
@@ -805,7 +933,7 @@ export function createIngestView(container, deps) {
       checkFinish();
     },
     // The rail badge: cards to review if there are any, else notes waiting.
-    badge: () => (!loaded ? 0 : openCards().length || waiting().length),
+    badge: () => (!loaded ? 0 : openCards().length || waiting().filter((n) => !needsReview(n) && !(promotion && !isQueue(n) && promotedAlready(n.properties || {}))).length),
     info: () => info,
     setInfo(changes) {
       Object.assign(info, changes);

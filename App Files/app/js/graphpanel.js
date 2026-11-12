@@ -16,6 +16,7 @@ export function createGraphPanel(root, { tagColors, onChange, onFolderChange }) 
   let showDuplicates = load('showDuplicates') !== 'false';
   let showNotes = load('showNotes') !== 'false';
   let showScripts = load('showScripts') !== 'false';
+  let showSessions = load('showSessions') !== 'false';
   let open = load('graphPanelOpen') !== 'false';
 
   root.innerHTML = `
@@ -43,6 +44,11 @@ export function createGraphPanel(root, { tagColors, onChange, onFolderChange }) 
           <span class="switch-track"></span>
           <span>Show scripts</span>
         </label>
+        <label class="switch notes-switch" title="Session notes captured from Claude Code sessions (Ingest, Sessions tab). Their tag pages stay.">
+          <input type="checkbox" class="show-sessions">
+          <span class="switch-track"></span>
+          <span>Show sessions</span>
+        </label>
       </div>
       <div class="panel-section grow">
         <div class="section-title">Tags</div>
@@ -60,6 +66,12 @@ export function createGraphPanel(root, { tagColors, onChange, onFolderChange }) 
   $('.show-notes').addEventListener('change', (e) => {
     showNotes = e.target.checked;
     store('showNotes', showNotes);
+    onChange({ fit: false });
+  });
+  $('.show-sessions').checked = showSessions;
+  $('.show-sessions').addEventListener('change', (e) => {
+    showSessions = e.target.checked;
+    store('showSessions', showSessions);
     onChange({ fit: false });
   });
   $('.show-scripts').checked = showScripts;
@@ -181,7 +193,7 @@ export function createGraphPanel(root, { tagColors, onChange, onFolderChange }) 
       render();
     },
     state() {
-      return { selected, colorBy, showDuplicates, showNotes, showScripts };
+      return { selected, colorBy, showDuplicates, showNotes, showScripts, showSessions };
     },
   };
 }

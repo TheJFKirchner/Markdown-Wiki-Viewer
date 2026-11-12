@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WikiApp</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="css/styles.css">
   <!-- Saved settings (served by the host from its settings.json; see persist.js), then the
        script that syncs them with the browser storage. Both run before the app. -->
@@ -36,6 +37,10 @@
       <button id="rail-ingest" class="rail-button" data-view="ingest" title="Ingest (Ctrl+5)" aria-label="Ingest">
         <svg viewBox="0 0 24 24"><path d="M4 13h4l1.5 3h5L16 13h4"/><path d="M4 13 6.5 5.5A1.5 1.5 0 0 1 7.9 4.5h8.2a1.5 1.5 0 0 1 1.4 1L20 13v5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18z"/><path d="M12 7v5M9.5 9.5 12 12l2.5-2.5"/></svg>
         <span id="ingest-badge" class="rail-badge"></span>
+      </button>
+      <span class="rail-spacer"></span>
+      <button id="rail-settings" class="rail-button" data-view="settings" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
       </button>
     </nav>
 
@@ -78,7 +83,24 @@
 
       <section id="notes-view" class="view" hidden></section>
 
-      <section id="ingest-view" class="view" hidden></section>
+      <section id="settings-view" class="view" hidden></section>
+
+      <section id="ingest-view" class="view" hidden>
+        <nav class="ingest-tabs" role="tablist">
+          <button class="ingest-tab" data-tab="notes" role="tab">Notes<span id="ingest-notes-count" class="ingest-tab-count"></span></button>
+          <button class="ingest-tab" data-tab="sessions" role="tab">Sessions<span id="ingest-sessions-count" class="ingest-tab-count"></span></button>
+          <button class="ingest-tab" data-tab="review" role="tab">Review<span id="ingest-review-count" class="ingest-tab-count"></span></button>
+          <button class="ingest-tab" data-tab="promotion" role="tab">Promotion<span id="ingest-promotion-count" class="ingest-tab-count"></span></button>
+          <span class="spacer"></span>
+          <button id="ingest-help" class="secondary-button ingest-help" title="How Ingest works">?</button>
+          <button id="ingest-agents" class="secondary-button" title="The four agents' prompts, the page templates and each wiki's rules (every path is in Settings)">✎ Agents and rules</button>
+        </nav>
+        <div id="ai-banner" class="ai-banner" hidden><span class="ai-banner-text"></span> <button class="link-button" data-goto="settings">Open Settings</button></div>
+        <div id="ingest-notes" class="ingest-pane" role="tabpanel"></div>
+        <div id="ingest-sessions" class="ingest-pane" role="tabpanel" hidden></div>
+        <div id="ingest-review" class="ingest-pane" role="tabpanel" hidden></div>
+        <div id="ingest-promotion" class="ingest-pane" role="tabpanel" hidden></div>
+      </section>
 
       <section id="welcome" class="welcome" hidden>
         <h1>WikiApp</h1>
@@ -88,6 +110,8 @@
     </main>
   </div>
 
+ <div id="setup-screen" class="setup-screen" hidden></div>
+  <div id="settings-dialog" class="dialog-backdrop" hidden></div>
   <div id="folder-dialog" class="dialog-backdrop" hidden></div>
   <div id="ingest-dialog" class="dialog-backdrop" hidden></div>
   <div id="toast" class="toast" role="status" hidden></div>
