@@ -89,10 +89,10 @@ class FreshStartTest(FolderTest):
         self.assertTrue(all(i["action"] in ("create", "copy", "found") for i in state["preview"]["items"]))
         entries = {e["name"]: e for e in pathlist.list_paths()}
         self.assertEqual((entries["settings"]["path"], entries["settings"]["state"]), ("", "unset"))
-        self.assertFalse(entries["prompt.team-wiki-manager"]["exists"])
+        self.assertEqual(entries["prompt.team-wiki-manager"]["status"], "built_in")   # read from the app itself
         appfolder.startup()
         pathlist.sync_slots()
-        for name in pathlist.slot_names():
+        for name in pathlist.slot_names() + list(pathlist.INTERNAL):
             self.assertTrue(pathlist.read_prompt(name) is not None)   # the shipped defaults still read
         self.assertIn("# Executive assistant", agentfiles.system("executive-assistant"))
         self.assertEqual(appfolder.open_path("settings")["ok"], False)
@@ -104,7 +104,9 @@ class FreshStartTest(FolderTest):
         with self.assertRaises(pathlist.PathMissing):
             pathlist.set_path("transcripts", str(self.base))
         with self.assertRaises(pathlist.PathMissing):
-            pathlist.reset_prompt("prompt.wikis-section")
+            pathlist.reset_prompt("template.daily")
+        with self.assertRaises(pathlist.PathMissing):
+            pathlist.customise_prompt("prompt.wiki-reviewer")
 
         self.assertEqual(snapshot(self.base), before)                    # ...but writes nothing
         self.assertFalse((wiki / ".wiki").exists())
@@ -117,14 +119,50 @@ class FreshStartTest(FolderTest):
 
 
 class ChooseTest(FolderTest):
+    def test_fresh_setup_creates_only_the_main_tier(self):
+        before = appfolder.first_run_state(str(self.place))["preview"]
+        self.assertEqual([i["name"] for i in before["items"]],
+                         ["app_folder", "settings", "personal_capture_rules", "note_templates", "template.daily", "template.weekly"])
+        self.choose()
+        made = {rel for rel, data in snapshot(self.folder).items() if data is not None}
+        self.assertEqual(made, {"capture-rules.md", "note-templates/Daily.md", "note-templates/Weekly.md",
+                                "paths.json", "leftovers.json"})
+        self.assertFalse((self.folder / "prompts").exists())             # agent prompts stay in the app
+        self.assertEqual(pathlist.path("personal_capture_rules"), self.folder / "capture-rules.md")
+        self.assertEqual(pathlist.path("template.daily"), self.folder / pathlist.NOTE_TEMPLATES_DIR / "Daily.md")
+        rows = pathlist.list_paths()
+        self.assertEqual(rows[0]["name"], "personal_capture_rules")       # the rules come first
+        self.assertEqual([r["name"] for r in rows if r["tier"] == "advanced"],
+                         ["prompt.executive-assistant", "prompt.wiki-reviewer", "prompt.team-wiki-manager"])
+        self.assertEqual([r["tier"] for r in rows][-3:], ["advanced"] * 3)   # advanced last
+        self.assertTrue(all(r["tier"] in ("main", "advanced") for r in rows))
+
+    def test_internal_slots_are_read_from_the_app_never_listed_or_copied(self):
+        self.choose()
+        listed = {r["name"] for r in pathlist.list_paths()}
+        for name, rel in pathlist.INTERNAL.items():
+            self.assertNotIn(name, listed, name)
+            self.assertEqual(pathlist.read_prompt(name), pathlist._normalise((APP_FILES / rel).read_text(encoding="utf-8-sig")))
+            self.assertEqual(pathlist.path(name), APP_FILES / rel)
+            self.assertEqual(pathlist.read_file(name)["text"], pathlist.read_prompt(name))   # the page's starters
+            for change in (lambda: pathlist.set_path(name, ""), lambda: pathlist.write_file(name, "x"),
+                           lambda: pathlist.reset_prompt(name), lambda: pathlist.describe(name)):
+                with self.assertRaises(ValueError):
+                    change()
+        pathlist.sync_slots()
+        appfolder.startup()
+        names = {Path(rel).name for rel in pathlist.INTERNAL.values()}
+        copied = [p for p in self.folder.rglob("*") if p.name in names]
+        self.assertEqual(copied, [])
+
     def test_choosing_a_folder_that_has_files_overwrites_none_of_them(self):
         (self.folder / "prompts").mkdir(parents=True)
-        (self.folder / "templates" / "Notes").mkdir(parents=True)
+        (self.folder / "note-templates").mkdir(parents=True)
         mine = {
             "prompts/team-wiki-manager.md": "---\nname: x\n---\nMY OWN MANAGER\n",
             "settings.json": '{"mine": "yes"}',
-            "templates/Notes/Daily.md": "MY DAILY\n",
-            "prompts/personal-capture-rules.md": "My rule\n",
+            "note-templates/Daily.md": "MY DAILY\n",
+            "capture-rules.md": "My rule\n",
             "something-else.txt": "keep me",
         }
         for rel, text in mine.items():
@@ -139,11 +177,14 @@ class ChooseTest(FolderTest):
         after = snapshot(self.folder)
         for rel, data in before.items():
             self.assertEqual(after[rel], data, rel)
-        self.assertTrue((self.folder / "prompts" / "wikis-section.md").is_file())       # missing ones were added
+        self.assertTrue((self.folder / "note-templates" / "Weekly.md").is_file())       # missing ones were added
+        self.assertFalse((self.folder / "prompts" / "wikis-section.md").exists())       # internal: never copied
         entries = {e["name"]: e for e in pathlist.list_paths()}
         self.assertEqual(entries["prompt.team-wiki-manager"]["status"], "customised")
+        self.assertEqual(entries["prompt.wiki-reviewer"]["status"], "built_in")
         self.assertEqual(entries["template.daily"]["status"], "customised")
-        self.assertEqual(entries["prompt.wikis-section"]["status"], "default")
+        self.assertEqual(entries["template.weekly"]["status"], "default")
+        self.assertEqual(pathlist.read_prompt("personal_capture_rules"), "My rule")
 
     def test_a_parent_folder_or_the_wiki_folder_itself_can_be_picked(self):
         self.assertEqual(pathlist.folder_for(str(self.place)), self.folder)
@@ -195,31 +236,60 @@ class SlotTest(FolderTest):
         return {e["name"]: e for e in pathlist.list_paths()}[name]
 
     def test_reset_restores_the_shipped_default(self):
-        file = self.folder / "prompts" / "wiki-reviewer.md"
+        file = self.folder / "note-templates" / "Daily.md"
         file.write_text("EDITED\n", encoding="utf-8")
-        self.assertEqual(self.status("prompt.wiki-reviewer")["status"], "customised")
-        self.assertTrue(self.status("prompt.wiki-reviewer")["can_reset"])
-        entry = pathlist.reset_prompt("prompt.wiki-reviewer")
+        self.assertEqual(self.status("template.daily")["status"], "customised")
+        self.assertTrue(self.status("template.daily")["can_reset"])
+        entry = pathlist.reset_prompt("template.daily")
         self.assertEqual(entry["status"], "default")
         self.assertFalse(entry["can_reset"])
-        self.assertEqual(file.read_text(encoding="utf-8"), pathlist.shipped_text("prompt.wiki-reviewer"))
+        self.assertEqual(file.read_text(encoding="utf-8"), pathlist.shipped_text("template.daily"))
 
     def test_an_unedited_copy_follows_a_newer_default_and_an_edited_one_does_not(self):
-        edited = self.folder / "prompts" / "wikis-section.md"
-        edited.write_text("MY WIKIS SECTION\n", encoding="utf-8")
-        for rel in ("agents/team-wiki-manager/SKILL.md", "agents/messages/wikis-section.md"):
+        edited = self.folder / "note-templates" / "Weekly.md"
+        edited.write_text("MY WEEKLY\n", encoding="utf-8")
+        for rel in ("app/templates/Notes/Daily.md", "app/templates/Notes/Weekly.md"):
             shipped = self.shipped / rel
             shipped.write_text(shipped.read_text(encoding="utf-8") + "\nA NEWER DEFAULT LINE\n", encoding="utf-8")
 
         report = pathlist.sync_slots()           # what each start does
-        self.assertIn("prompt.team-wiki-manager", report["updated"])
-        self.assertNotIn("prompt.wikis-section", report["updated"])
-        self.assertIn("A NEWER DEFAULT LINE", (self.folder / "prompts" / "team-wiki-manager.md").read_text(encoding="utf-8"))
-        self.assertEqual(edited.read_text(encoding="utf-8"), "MY WIKIS SECTION\n")
-        self.assertEqual(self.status("prompt.team-wiki-manager")["status"], "default")
-        self.assertEqual(self.status("prompt.wikis-section")["status"], "customised_newer_default")
-        pathlist.reset_prompt("prompt.wikis-section")
+        self.assertIn("template.daily", report["updated"])
+        self.assertNotIn("template.weekly", report["updated"])
+        self.assertIn("A NEWER DEFAULT LINE", (self.folder / "note-templates" / "Daily.md").read_text(encoding="utf-8"))
+        self.assertEqual(edited.read_text(encoding="utf-8"), "MY WEEKLY\n")
+        self.assertEqual(self.status("template.daily")["status"], "default")
+        self.assertEqual(self.status("template.weekly")["status"], "customised_newer_default")
+        pathlist.reset_prompt("template.weekly")
         self.assertIn("A NEWER DEFAULT LINE", edited.read_text(encoding="utf-8"))
+
+    def test_customise_and_reset_an_agent_prompt(self):
+        name, copy = "prompt.wiki-reviewer", self.folder / "prompts" / "wiki-reviewer.md"
+        shipped = self.shipped / "agents" / "wiki-reviewer" / "SKILL.md"
+        row = self.status(name)
+        self.assertEqual((row["tier"], row["status"], row["can_customise"], row["can_reset"]), ("advanced", "built_in", True, False))
+        self.assertEqual(row["path"], str(shipped))                       # read straight from the app
+        self.assertFalse(copy.exists())
+        row = pathlist.customise_prompt(name)
+        self.assertEqual((row["status"], row["can_customise"], row["can_reset"], row["path"]), ("customised", False, True, str(copy)))
+        self.assertEqual(copy.read_text(encoding="utf-8"), pathlist.shipped_text(name))
+        copy.write_text("---\nname: wiki-reviewer\n---\nMY REVIEWER\n", encoding="utf-8")
+        self.assertTrue(agentfiles.system("wiki-reviewer").startswith("MY REVIEWER"))
+        pathlist.customise_prompt(name)                                  # again: the copy is left alone
+        self.assertIn("MY REVIEWER", copy.read_text(encoding="utf-8"))
+        shipped.write_text(shipped.read_text(encoding="utf-8") + "\nNEWER\n", encoding="utf-8")
+        pathlist.sync_slots()
+        self.assertEqual(self.status(name)["status"], "customised_newer_default")
+        self.assertIn("MY REVIEWER", copy.read_text(encoding="utf-8"))   # an edited copy never follows
+        row = pathlist.reset_prompt(name)
+        self.assertEqual((row["status"], row["path"]), ("built_in", str(shipped)))
+        self.assertFalse(copy.exists())
+        self.assertIn("NEWER", agentfiles.system("wiki-reviewer"))
+        # Saving a built-in prompt makes the copy first: the app's own file is never written.
+        before = shipped.read_text(encoding="utf-8")
+        agentfiles.save("wiki-reviewer", "---\nname: wiki-reviewer\n---\nSAVED\n")
+        self.assertEqual(shipped.read_text(encoding="utf-8"), before)
+        self.assertIn("SAVED", copy.read_text(encoding="utf-8"))
+        self.assertEqual(self.status(name)["status"], "customised")
 
     def test_a_slot_can_point_at_an_existing_file_such_as_a_skill(self):
         skill = self.base / "skills" / "team-wiki-manager" / "SKILL.md"
@@ -234,16 +304,18 @@ class SlotTest(FolderTest):
             agentfiles.save("team-wiki-manager", "no frontmatter")
         agentfiles.save("team-wiki-manager", "---\nname: team-wiki-manager\n---\nSAVED\n")
         self.assertIn("SAVED", skill.read_text(encoding="utf-8"))
-        pathlist.set_path("prompt.team-wiki-manager", "")                      # back to the default place
-        self.assertEqual(pathlist.path("prompt.team-wiki-manager"), self.folder / "prompts" / "team-wiki-manager.md")
+        pathlist.reset_prompt("prompt.team-wiki-manager")                # forgets the file, which stays
+        self.assertTrue(skill.is_file())
+        self.assertEqual(pathlist.path("prompt.team-wiki-manager"), self.shipped / "agents" / "team-wiki-manager" / "SKILL.md")
+        self.assertEqual(self.status("prompt.team-wiki-manager")["status"], "built_in")
 
     def test_personal_capture_rules_are_never_overwritten(self):
         name = "personal_capture_rules"
         file = pathlist.path(name)
-        self.assertEqual(file, self.folder / "prompts" / "personal-capture-rules.md")
+        self.assertEqual(file, self.folder / "capture-rules.md")
         self.assertEqual(pathlist.read_prompt(name), "")               # the starter is only comments
         entry = self.status(name)
-        self.assertEqual((entry["status"], entry["can_reset"], entry["group"]), (None, False, "Prompts"))
+        self.assertEqual((entry["status"], entry["can_reset"], entry["group"], entry["tier"]), (None, False, "Rules", "main"))
         with self.assertRaises(ValueError):
             pathlist.reset_prompt(name)
         file.write_text("<!-- note -->\n- Give every client its own page.\n", encoding="utf-8")
@@ -257,8 +329,8 @@ class SlotTest(FolderTest):
 
     def test_personal_capture_rules_already_there_before_setup_are_kept(self):
         other = self.base / "place2"
-        (other / ".wiki" / "prompts").mkdir(parents=True)
-        rules = other / ".wiki" / "prompts" / "personal-capture-rules.md"
+        (other / ".wiki").mkdir(parents=True)
+        rules = other / ".wiki" / "capture-rules.md"
         rules.write_text("ALREADY MINE\n", encoding="utf-8")
         appfolder.relocate(str(other), "adopt")
         self.assertEqual(rules.read_text(encoding="utf-8"), "ALREADY MINE\n")
@@ -267,23 +339,24 @@ class SlotTest(FolderTest):
     def test_a_missing_configured_path_is_reported_not_recreated(self):
         transcripts = self.base / "transcripts"
         transcripts.mkdir()
-        mine = self.base / "my-tasks.md"
+        mine = self.base / "my-manager.md"
         mine.write_text("MINE\n", encoding="utf-8")
         pathlist.set_path("transcripts", str(transcripts))
-        pathlist.set_path("prompt.wikis-section", str(mine))
+        pathlist.set_path("prompt.team-wiki-manager", str(mine))
         transcripts.rmdir()
         mine.unlink()
-        (self.folder / "templates" / "Notes" / "Daily.md").unlink()   # deleted at its usual place
+        (self.folder / "note-templates" / "Daily.md").unlink()   # deleted at its usual place
         pathlist.sync_slots()
         appfolder.startup()
         entries = {e["name"]: e for e in pathlist.list_paths()}
-        for name in ("transcripts", "prompt.wikis-section", "template.daily"):
+        for name in ("transcripts", "prompt.team-wiki-manager", "template.daily"):
             self.assertFalse(entries[name]["exists"], name)
+            self.assertEqual(entries[name]["state"], "missing", name)
         self.assertFalse(transcripts.exists())
         self.assertFalse(mine.exists())
-        self.assertFalse((self.folder / "templates" / "Notes" / "Daily.md").exists())
+        self.assertFalse((self.folder / "note-templates" / "Daily.md").exists())
         with self.assertRaises(pathlist.PathMissing) as caught:
-            pathlist.read_prompt("prompt.wikis-section")
+            pathlist.read_prompt("prompt.team-wiki-manager")
         self.assertIn(str(mine), str(caught.exception))
         # A whole private folder that has gone is reported too, and not made again.
         shutil.rmtree(self.folder)
@@ -293,6 +366,73 @@ class SlotTest(FolderTest):
             IngestRuns(lambda *a: None).save_state("{}")
         self.assertFalse(self.folder.exists())
 
+
+class UpgradeTest(FolderTest):
+    """A .wiki made by the first layout (everything copied in), tidied on the first start."""
+
+    def put(self, rel, text):
+        file = self.folder / rel
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(text, encoding="utf-8")
+        return file
+
+    def test_an_old_layout_wiki_folder_is_tidied_and_nothing_edited_is_lost(self):
+        shipped = pathlist.shipped_text
+        mine_weekly = self.base / "elsewhere" / "Weekly.md"
+        mine_weekly.parent.mkdir()
+        mine_weekly.write_text("MY OWN WEEKLY, ELSEWHERE\n", encoding="utf-8")
+        files = {
+            "older_default": self.put("prompts/wikis-section.md", "AN OLDER DEFAULT\n"),          # = a recorded default
+            "same": self.put("prompts/ingest-feedback.md", shipped("prompt.ingest-feedback")),     # = today's shipped
+            "edited_internal": self.put("prompts/sessions-review.md", "MY REVIEW WORDING\n"),
+            "tasks": self.put("prompts/TASKS.md", "THE OLD TASK GUIDE\n"),                         # retired, unedited
+            "agent_same": self.put("prompts/wiki-reviewer.md", shipped("prompt.wiki-reviewer")),
+            "agent_edited": self.put("prompts/team-wiki-manager.md", "---\nname: x\n---\nMY MANAGER\n"),
+            "starter": self.put("starters/wiki-rules.md", shipped("template.rules-starter")),
+            "sample_note": self.put("templates/Notes/Sample note.md", shipped("template.sample-note")),
+            "sample_page_edited": self.put("templates/Pages/Sample page.md", "MY PAGE TEMPLATE\n"),
+            "daily": self.put("templates/Notes/Daily.md", "MY DAILY\n"),
+            "rules": self.put("prompts/personal-capture-rules.md", "MY RULES\n"),
+        }
+        record = {"version": 1, "overrides": {"template.weekly": str(mine_weekly)}, "slots": {
+            "prompt.wikis-section": {"base": pathlist._hash("AN OLDER DEFAULT\n"), "seeded": True},
+            "prompt.tasks": {"base": pathlist._hash("THE OLD TASK GUIDE\n"), "seeded": True},
+            "prompt.sessions-review": {"base": pathlist._hash(shipped("prompt.sessions-review")), "seeded": True},
+            "template.daily": {"base": pathlist._hash(shipped("template.daily")), "seeded": True},
+            "personal_capture_rules": {"seeded": True}}}
+        self.put("paths.json", json.dumps(record))
+        self.put("leftovers.json", "[]")
+
+        self.choose()                                                    # adopts it, as a first start would
+
+        for gone in ("older_default", "same", "tasks", "agent_same", "starter", "sample_note"):
+            self.assertFalse(files[gone].exists(), gone)                 # unedited: removed quietly
+        for kept, text in (("edited_internal", "MY REVIEW WORDING\n"), ("agent_edited", "---\nname: x\n---\nMY MANAGER\n"),
+                           ("sample_page_edited", "MY PAGE TEMPLATE\n")):
+            self.assertEqual(files[kept].read_text(encoding="utf-8"), text, kept)   # edited: never deleted
+        self.assertEqual((self.folder / "note-templates" / "Daily.md").read_text(encoding="utf-8"), "MY DAILY\n")
+        self.assertEqual((self.folder / "capture-rules.md").read_text(encoding="utf-8"), "MY RULES\n")
+        self.assertFalse(files["daily"].exists())
+        self.assertFalse(files["rules"].exists())
+        self.assertFalse((self.folder / "starters").exists())           # empty old folders go
+        self.assertFalse((self.folder / "templates" / "Notes").exists())
+        rows = {r["name"]: r for r in pathlist.list_paths()}
+        self.assertEqual(rows["template.daily"]["status"], "customised")
+        self.assertEqual(rows["template.weekly"]["path"], str(mine_weekly))   # the person's override stays
+        self.assertEqual(mine_weekly.read_text(encoding="utf-8"), "MY OWN WEEKLY, ELSEWHERE\n")
+        self.assertEqual(rows["prompt.team-wiki-manager"]["status"], "customised")
+        self.assertEqual(rows["prompt.wiki-reviewer"]["status"], "built_in")
+        self.assertEqual(pathlist.read_prompt("personal_capture_rules"), "MY RULES")
+        self.assertEqual(pathlist.read_prompt("prompt.sessions-review"), shipped("prompt.sessions-review"))   # no longer read
+        self.assertTrue(agentfiles.system("team-wiki-manager").startswith("MY MANAGER"))
+        listed = {item["path"] for item in appfolder.read_leftovers()}
+        self.assertIn(str(files["edited_internal"]), listed)             # reported once
+        self.assertIn(str(files["sample_page_edited"]), listed)
+        self.assertEqual(pathlist.load_record()["layout"], pathlist.LAYOUT_VERSION)
+        before = snapshot(self.folder)
+        pathlist.sync_slots()                                            # the next start changes nothing
+        appfolder.startup()
+        self.assertEqual(snapshot(self.folder), before)
 
 class MigrationTest(FolderTest):
     def test_migration_copies_and_deletes_nothing(self):
@@ -315,8 +455,9 @@ class MigrationTest(FolderTest):
 
         preview = appfolder.first_run_state(str(self.place))["preview"]
         actions = {i["name"]: i["action"] for i in preview["items"]}
-        self.assertEqual((actions["settings"], actions["prompt.team-wiki-manager"], actions["prompt.wikis-section"]),
+        self.assertEqual((actions["settings"], actions["prompt.team-wiki-manager"], actions["template.daily"]),
                          ("copy", "copy", "create"))
+        self.assertNotIn("prompt.wiki-reviewer", actions)                # unedited: nothing to bring over
         self.choose()
 
         self.assertEqual((snapshot(self.base / "old-home"), snapshot(wiki)), before)    # nothing deleted or changed
@@ -327,7 +468,8 @@ class MigrationTest(FolderTest):
         entries = {e["name"]: e for e in pathlist.list_paths()}
         self.assertEqual(entries["prompt.team-wiki-manager"]["status"], "customised")  # the edits count as the person's
         self.assertIn("MY EDITED MANAGER", pathlist.read_prompt("prompt.team-wiki-manager"))
-        self.assertEqual(entries["prompt.wiki-reviewer"]["status"], "default")
+        self.assertEqual(entries["prompt.wiki-reviewer"]["status"], "built_in")
+        self.assertFalse((self.folder / "prompts" / "wiki-reviewer.md").exists())
         self.assertEqual(entries["wiki.team.rules"]["path"], str(wiki / "wiki_rules.md"))
         kinds = sorted(item["kind"] for item in appfolder.read_leftovers())
         self.assertEqual(kinds, ["old_app_folder", "old_index", "old_skill", "old_skill"])
@@ -353,7 +495,7 @@ class MigrationTest(FolderTest):
         for name in retired:
             with self.assertRaises(ValueError):
                 pathlist.set_path(name, "")
-        prompts_text = "".join(p.read_text(encoding="utf-8") for p in (self.folder / "prompts").glob("*.md"))
+        prompts_text = "".join(p.read_text(encoding="utf-8") for p in self.folder.rglob("*.md"))
         self.assertNotIn("ALWAYS LINK PEOPLE", prompts_text)
         self.assertIn(str(self.old["skills"] / "note-taker"), [i["path"] for i in appfolder.read_leftovers()])
         self.assertNotIn("note-taker", [a["id"] for a in agentfiles.info()])
@@ -362,7 +504,7 @@ class MigrationTest(FolderTest):
 class RelocateTest(FolderTest):
     def test_move_takes_the_contents_and_needs_an_empty_place(self):
         self.choose()
-        (self.folder / "prompts" / "wikis-section.md").write_text("EDITED", encoding="utf-8")
+        (self.folder / "note-templates" / "Daily.md").write_text("EDITED", encoding="utf-8")
         busy = self.base / "busy" / ".wiki"
         busy.mkdir(parents=True)
         (busy / "x.txt").write_text("x", encoding="utf-8")
@@ -373,7 +515,7 @@ class RelocateTest(FolderTest):
         new.mkdir()
         appfolder.relocate(str(new), "move")
         self.assertEqual(pathlist.app_folder(), new / ".wiki")
-        self.assertEqual((new / ".wiki" / "prompts" / "wikis-section.md").read_text(encoding="utf-8"), "EDITED")
+        self.assertEqual((new / ".wiki" / "note-templates" / "Daily.md").read_text(encoding="utf-8"), "EDITED")
         self.assertFalse(self.folder.exists())
 
     def test_adopt_uses_what_is_there_and_leaves_the_old_folder(self):
@@ -386,7 +528,7 @@ class RelocateTest(FolderTest):
         appfolder.relocate(str(other.parent), "adopt")
         self.assertEqual(pathlist.app_folder(), other)
         self.assertEqual((other / "settings.json").read_text(encoding="utf-8"), '{"theirs": "1"}')
-        self.assertTrue((self.folder / "prompts" / "wikis-section.md").is_file())  # the old one is untouched
+        self.assertTrue((self.folder / "capture-rules.md").is_file())  # the old one is untouched
 
 
 class EngineAndAgentlibTest(FolderTest):
@@ -449,12 +591,14 @@ class EngineAndAgentlibTest(FolderTest):
         self.choose()
         opened = []
         with mock.patch.object(appfolder, "system_open", opened.append):
-            self.assertEqual(appfolder.open_path("prompts"), {"ok": True})
-            self.assertEqual(appfolder.open_path("prompt.wikis-section"), {"ok": True})
+            self.assertEqual(appfolder.open_path("note_templates"), {"ok": True})
+            self.assertEqual(appfolder.open_path("personal_capture_rules"), {"ok": True})
             self.assertFalse(appfolder.open_path("run_history")["ok"])                    # not made yet
+            self.assertFalse(appfolder.open_path("prompts")["ok"])                        # nothing customised yet
             self.assertFalse(appfolder.open_path("tag_list_reference")["ok"])             # unset
+            self.assertFalse(appfolder.open_path("prompt.wikis-section")["ok"])           # internal: no entry
             self.assertFalse(appfolder.open_path("no-such-entry")["ok"])
-        self.assertEqual(opened, [self.folder / "prompts", self.folder / "prompts" / "wikis-section.md"])
+        self.assertEqual(opened, [self.folder / "note-templates", self.folder / "capture-rules.md"])
 
     def test_row_states_and_clearing_an_optional_entry(self):
         wiki = self.make_wiki("team")
@@ -462,10 +606,11 @@ class EngineAndAgentlibTest(FolderTest):
         self.choose()
         rows = {e["name"]: e for e in pathlist.list_paths()}
         self.assertTrue(all(e["state"] in pathlist.STATES for e in rows.values()))
-        self.assertEqual(rows["prompt.wikis-section"]["state"], "ok")
+        self.assertEqual(rows["prompt.wiki-reviewer"]["state"], "ok")    # the app's own file
         self.assertEqual(rows["settings"]["state"], "ok")
+        self.assertEqual(rows["wiki.team.templates"]["state"], "unset")  # no Templates folder: none
         for name in ("run_history", "engine_settings", "window_placement", "pending_promotion", "wiki.team.index",
-                     "wiki.team.progress", "wiki.team.rules"):
+                     "wiki.team.progress", "wiki.team.rules", "prompts"):
             self.assertEqual(rows[name]["state"], "not_created", name)
         self.assertEqual((rows["tag_list_reference"]["state"], rows["tag_list_reference"]["can_clear"]), ("unset", False))
         self.assertFalse(rows["settings"]["can_clear"])
@@ -477,8 +622,8 @@ class EngineAndAgentlibTest(FolderTest):
         self.assertEqual(pathlist.describe("tag_list_reference")["state"], "missing")
         cleared = pathlist.set_path("tag_list_reference", "")                              # clear
         self.assertEqual((cleared["path"], cleared["state"], cleared["can_clear"]), ("", "unset", False))
-        (self.folder / "prompts" / "wikis-section.md").unlink()                                    # deleted at its usual place
-        self.assertEqual(pathlist.describe("prompt.wikis-section")["state"], "missing")
+        (self.folder / "note-templates" / "Weekly.md").unlink()                                    # deleted at its usual place
+        self.assertEqual(pathlist.describe("template.weekly")["state"], "missing")
         gone = self.base / "gone"
         gone.mkdir()
         pathlist.set_path("transcripts", str(gone))
@@ -542,7 +687,10 @@ class BridgeTest(FolderTest):
         self.assertTrue(call("firstRunState", {})["valid"])
         call("chooseFolder", {"path": str(self.place)})
         rows = call("listPaths", {})
-        self.assertTrue(all({"state", "can_clear"} <= set(r) for r in rows))
+        self.assertTrue(all({"state", "can_clear", "tier", "can_customise"} <= set(r) for r in rows))
+        row = call("customisePrompt", {"name": "prompt.executive-assistant"})
+        self.assertEqual(row["status"], "customised")
+        self.assertEqual(call("resetPrompt", {"name": "prompt.executive-assistant"})["status"], "built_in")
         saved = call("setEngineSettings", {"settings": {"engines": {"claude": {"models": {"team-wiki-manager": "claude-opus-5"}}}}})
         self.assertEqual(saved["engines"]["claude"]["models"]["team-wiki-manager"], "claude-opus-5")
         got = call("setAgentModel", {"agent": "executive-assistant", "model": "claude-sonnet-5-5"})
@@ -586,8 +734,7 @@ class WikisTest(FolderTest):
         self.choose()
         model = wikis.Wikis([{"alias": "team", "root": str(own)}, {"alias": "personal", "root": str(bare)}])
         self.assertEqual([p.name for p in model.page_templates("team")], ["Own"])               # its own folder
-        self.assertEqual([p.name for p in model.page_templates("personal")], ["Sample page"])  # the private ones
-        self.assertIn("## Summary", model.pages["personal:Templates/Pages/Sample page.md"].text)
+        self.assertEqual(model.page_templates("personal"), [])          # none: the sample is internal, never copied
         self.assertIsNone(model.rules_text("team"))
         rules = self.base / "elsewhere-rules.md"
         rules.write_text("RULES FROM ELSEWHERE", encoding="utf-8")

@@ -1,6 +1,6 @@
 ---
 type: personal
 ---
-This folder is a personal wiki. Claude Code sessions are captured into it: a note for each session in the `Sessions` folder, and a page for each topic (one piece of work) at the top level. A topic's tags connect it to related topics, and a tag that several topics share can become a folder. Sessions are only ever written to a folder whose `type` above is `personal`.
+This file is only for the second-brain command line (`sb.py`) used on its own, without WikiApp: it marks this folder as the personal wiki that `sb.py` may write to. WikiApp doesn't create or read it; there, the wiki's role in Settings decides which wiki is personal.
 
-Rules for the agents that work in this wiki go in `wiki_rules.md`, next to this file (in WikiApp: Ingest, then Agents and rules).
+Claude Code sessions and notes are captured into this folder: a record for each in the `Sessions` folder, and a page for each topic (one piece of work) at the top level. Rules for what gets captured are your own "My capture rules" file, kept in WikiApp's private folder (in WikiApp: Settings, Rules), not in this folder.

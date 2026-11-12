@@ -36,6 +36,11 @@ DEFAULTS = {
     "lookback_days": 14,
     "review_after_entries": 3,
     "folder_after_topics": 3,
+    # The Sessions list hides sessions with fewer of the person's own messages than this, on the
+    # command line on its own. With WikiApp's private folder the app's filter decides instead
+    # (pathlist.get_sessions_filter, default 3; 0 = off). min_user_messages is the older name,
+    # still read when min_turns isn't set.
+    "min_turns": None,
     "min_user_messages": 2,
     "max_transcript_chars": 160000,
     "llm_timeout_seconds": 300,
@@ -50,6 +55,7 @@ class ConfigError(Exception):
 class Config:
     def __init__(self, values: dict, path: Path | None):
         self.path = path
+        self._given = set(values)
         for key, default in DEFAULTS.items():
             setattr(self, key, values.get(key, default))
         unknown = sorted(set(values) - set(DEFAULTS))
@@ -64,6 +70,23 @@ class Config:
         for key, agent in (("extract_model", "executive-assistant"), ("review_model", "wiki-reviewer")):
             if key not in values and isinstance(models.get(agent), str) and models[agent]:
                 setattr(self, key, models[agent])
+
+    def hide_below(self) -> int:
+        """Sessions with fewer of the person's own messages than this are left out of the list
+        (0: none are). With WikiApp's private folder: exactly what the app shows
+        (pathlist.get_sessions_filter: the stored filter, else 3); config.json isn't consulted, so
+        the two always agree. On the command line on its own: config.json's min_turns, else its
+        older min_user_messages, else 3."""
+        try:
+            if pathlist.app_folder() is not None:
+                return pathlist.get_sessions_filter()["min_turns"]
+        except Exception:  # an unreadable private folder: as on the command line on its own
+            pass
+        if isinstance(self.min_turns, int) and not isinstance(self.min_turns, bool):
+            return max(0, self.min_turns)
+        if "min_user_messages" in self._given and isinstance(self.min_user_messages, int):
+            return max(0, self.min_user_messages)
+        return pathlist.DEFAULT_MIN_TURNS
 
     @staticmethod
     def _dir(value: str) -> Path | None:

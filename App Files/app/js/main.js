@@ -28,6 +28,7 @@ import { createSettingsView } from './settingsview.js';
 import { showSetup, showLeftovers } from './setup.js';
 import { refreshAi } from './ai.js';
 import { loadEngineModels } from './modelmenu.js';
+import { loadRoles, aliasWithRole, onRolesChange, roleOf, ROLE_LABEL } from './roles.js';
 import { NOTE_TEMPLATES_DIR, PAGE_TEMPLATES_DIR, DEFAULT_NOTES_DIR, cleanNotesDir, setDefaultTemplates, templatesIn, fillTemplate, newNotePath, noteInfo } from './notes.js';
 
 const $ = (id) => document.getElementById(id);
@@ -223,11 +224,11 @@ const notesView = createNotesView($('notes-view'), {
   onSaveFailed: (note) => toast(`Your last edits to ${note.name} couldn't be saved. They're kept in the Notes view: open it to keep them or load the latest version.`),
 });
 
-// The Ingest view has four tabs, one per agent:
-//   Notes      the note taker: wrapped quick notes -> changes to wiki pages, answered card by card
+// The Ingest view has four tabs (three agents; Notes and Sessions share one):
+//   Notes      the executive assistant: wrapped quick notes -> records filed under topics in the personal wiki, written directly
 //   Sessions   the executive assistant: Claude Code sessions -> session notes filed under topics, written directly
 //   Review     the wiki reviewer: rewrites a topic page's summary, suggests merges; folders from shared tags
-//   Promotion  the team wiki manager: personal pages -> changes to the team wiki, answered card by card
+//   Promotion  the team wiki manager: personal pages -> changes to the Team wiki, answered card by card
 const INGEST_TABS = ['notes', 'sessions', 'review', 'promotion'];
 function updateIngestCounts() {
   $('ingest-badge').textContent = ingestView.badge() || '';
@@ -258,6 +259,7 @@ document.querySelector('.ingest-tabs').addEventListener('click', (e) => {
 
 const sessionsView = createSessionsView($('ingest-sessions'), {
   call,
+  getPersonalWiki: () => workspace.find(aliasWithRole('personal')) || null,
   getFolders: () => workspace.list(),
   findFolder: (alias) => workspace.find(alias),
   reload: async (alias) => {
@@ -306,6 +308,7 @@ const promotionView = createIngestView($('ingest-promotion'), {
   ...cardViewDeps,
   mode: 'promotion',
   getSourceWiki: () => sessionsView.wiki(),
+  getTeamWiki: () => workspace.find(aliasWithRole('team')) || null,
 });
 
 // The Notes tab: capture wrapped notes into the personal wiki (capturenotes.js).
@@ -324,7 +327,7 @@ const ingestView = createCaptureView($('ingest-notes'), {
   onCaptured: () => reviewView.refresh(),
 });
 const ingestDialogs = createIngestDialogs($('ingest-dialog'), {
-  // The four agents and their prompt files (Claude Code skills; see agents/agentfiles.py).
+  // The three agents and their prompts (built in until customised; see agents/agentfiles.py).
   getAgents: () => call('agentsInfo'),
   saveAgent: async (id, text) => {
     try {
@@ -334,28 +337,48 @@ const ingestDialogs = createIngestDialogs($('ingest-dialog'), {
       return err.message;
     }
   },
-  // Each wiki's rules file, read through the path list (wiki.<alias>.rules), and the starter for one that
-  // doesn't exist yet (template.rules-starter, with {{alias}} filled in).
-  getWikis: async () => {
-    const starter = await readSlot('template.rules-starter');
-    return Promise.all(workspace.list().map(async (f) => {
-      let file = { text: null, path: '' };
+  // The connected wikis, for the page-template list.
+  getWikis: async () => workspace.list().map((f) => ({ alias: f.alias, color: f.color })),
+  // The rules files the Agents window edits, read through the path list: "My capture rules" (steers capture and
+  // Review in the Personal wiki) and the Team wiki's rules (steer Promotion). A View only wiki's rules aren't used.
+  getRulesTabs: async () => {
+    const tabs = [];
+    const read = async (name) => {
       try {
-        file = await call('readPathFile', { name: `wiki.${f.alias}.rules` });
-      } catch { /* no rules file known for it */ }
-      return { alias: f.alias, color: f.color, path: file.path, text: file.text, starter: fillAlias(starter, f.alias) };
-    }));
+        return await call('readPathFile', { name });
+      } catch {
+        return { path: '', text: null };
+      }
+    };
+    const capture = await read('personal_capture_rules');
+    tabs.push({
+      key: 'capture', label: 'My capture rules', name: 'personal_capture_rules', path: capture.path, color: null,
+      text: capture.text, starter: capture.starter_text || '',
+      about: 'Your own rules for what gets captured into your Personal wiki (notes and sessions) and how topics are reviewed: what to pick out, and what earns its own page.',
+    });
+    const team = aliasWithRole('team');
+    const folder = team && workspace.find(team);
+    if (folder) {
+      const file = await read(`wiki.${team}.rules`);
+      const starter = await readSlot('template.rules-starter');
+      tabs.push({
+        key: `team:${team}`, label: `${team} rules (Team)`, name: `wiki.${team}.rules`, path: file.path, color: folder.color,
+        text: file.text, starter: fillAlias(starter, team),
+        about: 'Promotion follows these when it proposes pages in the Team wiki.',
+      });
+    }
+    return tabs;
   },
-  // Writes the wiki's rules file through the path list; refused if it changed since the window opened it.
-  saveRules: async (alias, text, opened) => {
-    const folder = workspace.find(alias);
-    if (!folder) return 'that folder is no longer in the workspace.';
+  // Writes a rules file through the path list; refused if it changed since the window opened it.
+  saveRules: async (name, text, opened) => {
     try {
-      await call('writePathFile', { name: `wiki.${alias}.rules`, text, ...(opened != null ? { expect: opened } : {}) });
+      await call('writePathFile', { name, text, ...(opened != null ? { expect: opened } : {}) });
     } catch (err) {
       return /changed on disk/.test(err.message) ? 'the file changed outside the app. Close and reopen this window to see it.' : err.message;
     }
-    if (await scanFolder(folder)) rebuild();
+    const alias = /^wiki\.(.+)\.rules$/.exec(name)?.[1];
+    const folder = alias && workspace.find(alias);
+    if (folder && (await scanFolder(folder))) rebuild();
     return true;
   },
   // Page templates for Ingest's new pages, in every wiki: [{ id, alias, name, path, description }].
@@ -388,11 +411,6 @@ const ingestDialogs = createIngestDialogs($('ingest-dialog'), {
 // The Settings screen: every path WikiApp uses, and the AI engine. Reached from the gear at the bottom of the rail.
 const settingsView = createSettingsView($('settings-view'), {
   getFolders: () => workspace.list(),
-  getPersonal: () => sessionsView.wiki(),
-  setPersonal: (alias) => {
-    store('sessionsWiki', alias);
-    ingestView.redraw();
-  },
   toast: (message) => toast(message),
   // A file inside a connected wiki opens in the app's own editor; anything else is the caller's to show.
   openInEditor: async (path) => {
@@ -414,6 +432,23 @@ const settingsView = createSettingsView($('settings-view'), {
     if (state.vault) rebuild();
     if (names.some((n) => /^wiki\./.test(n))) for (const f of workspace.list()) if (await scanFolder(f)) rebuild();
   },
+});
+
+// Roles (Personal, Team, View only) live in the host; the page's copy is refreshed after the workspace changes
+// (a moment later, so the host has the saved folder list) and the views that depend on it redraw.
+async function refreshRoles() {
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  await loadRoles();
+}
+onRolesChange(() => {
+  if (state.vault) explorer.setVault(state.vault);
+  refreshPanel();
+  sessionsView.rolesChanged();
+  reviewView.refresh();
+  ingestView.redraw();
+  if (state.vault) promotionView.setVault(state.vault);
+  updateIngestCounts();
+  if (state.view === 'ingest') showIngestTab(load('ingestTab'));
 });
 
 $('add-folder').addEventListener('click', () => dialog.open());
@@ -711,6 +746,8 @@ async function saveFolder({ mode, root, scan, alias, color, oldAlias }) {
     state.scans.set(alias, scan);
     await scanFolder(workspace.find(alias)); // starts watching it too
     rebuild({ fit: true });
+    await refreshRoles();
+    if (roleOf(alias) === 'view') toast(`${alias} is View only. To give it a role (Personal or Team), open Settings, Wikis and their roles.`);
     return;
   }
   workspace.update(oldAlias, { alias, color });
@@ -722,6 +759,7 @@ async function saveFolder({ mode, root, scan, alias, color, oldAlias }) {
     if (state.openId?.startsWith(oldAlias + ':')) state.openId = alias + state.openId.slice(oldAlias.length);
   }
   rebuild();
+  if (alias !== oldAlias) refreshRoles();
 }
 
 function removeFolder(alias) {
@@ -730,6 +768,7 @@ function removeFolder(alias) {
   for (const map of [state.scans, state.errors, state.signatures]) map.delete(alias);
   call('unwatchFolder', { path: folder.root });
   rebuild({ fit: true });
+  refreshRoles();
 }
 
 function fileExists(id) {
@@ -1107,6 +1146,7 @@ async function start() {
   }
   refreshAi();
   await loadEngineModels();
+  await loadRoles();
   await loadPaths();
   if (first.leftovers?.length) showLeftovers($('settings-dialog'), first.leftovers);
   // Folders passed on the command line join the workspace (alias from the folder name).

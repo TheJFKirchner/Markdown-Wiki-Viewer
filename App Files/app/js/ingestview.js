@@ -16,6 +16,7 @@
 import { parseFrontmatter, normalizeTags, parseLink, resolveTarget } from './vault.js';
 import { parseNote, withProperties, TEMPLATES_DIR } from './notes.js';
 import { isoDate } from './tasks.js';
+import { rolePrompt, roleBadge } from './roles.js';
 import { chosenModel as chosenModelFor, modelMenu as sharedModelMenu, rememberModel } from './modelmenu.js';
 
 const WIKILINK = /\[\[([^[\]\n]+?)\]\]/g;
@@ -60,7 +61,8 @@ export function createIngestView(container, deps) {
   const T = TEXT[stateName];
   const getSourceWiki = deps.getSourceWiki || (() => null); // promotion: the personal wiki's folder
   // Promotion: the wikis changes may be proposed in (every folder but the personal wiki).
-  const targets = () => getFolders().filter((f) => f.alias !== getSourceWiki()?.alias).map((f) => f.alias);
+  // Promotion's target is the Team wiki only; View only wikis are never a write target.
+  const targets = () => (deps.getTeamWiki?.() ? [deps.getTeamWiki().alias] : []);
   let info = { ready: false, running: false };
   let state = { run: null, cards: [], last: null };
   let pastRuns = []; // [{ runId, transcript (parsed, or null) }], newest first
@@ -244,8 +246,8 @@ export function createIngestView(container, deps) {
     if (running()) return 'A run is going.';
     if (pendingQuestions().length) return 'Answer Claude\'s questions first.';
     if (openCards().length) return `Answer the ${plural(openCards().length, 'proposed change')} and submit first.`;
-    if (promotion && !getSourceWiki()) return 'Choose your personal wiki in the Sessions tab first.';
-    if (promotion && !targets().length) return 'Add your team wiki\'s folder to the workspace first.';
+    if (promotion && !getSourceWiki()) return 'Give a wiki the Personal role in Settings first.';
+    if (promotion && !targets().length) return 'Give a wiki the Team role in Settings first.';
     if (!count) return T.select;
     return '';
   }
@@ -273,7 +275,8 @@ export function createIngestView(container, deps) {
           </header>
           <p class="ingest-intro">${esc(T.intro)}</p>
           ${info.ready ? '' : setupBox()}
-          <div class="ingest-list">${notes.length ? notes.map(noteRow).join('') : `<p class="ingest-empty">${esc(blocker(1) && promotion && (!getSourceWiki() || !targets().length) ? blocker(1) : T.empty)}</p>`}</div>
+          ${!getSourceWiki() ? rolePrompt('personal') : !targets().length ? rolePrompt('team') : `<p class="session-faint">Proposes changes in the Team wiki: <strong>${esc(targets()[0])}</strong> ${roleBadge(targets()[0])}</p>`}
+          <div class="ingest-list">${notes.length ? notes.map(noteRow).join('') : `<p class="ingest-empty">${esc(blocker(1) && promotion && (!getSourceWiki() || !targets().length) ? '' : T.empty)}</p>`}</div>
           <div class="ingest-actions">
             ${notes.length ? `<button class="link-button" data-action="all">${count && count === notes.filter((n) => !needsReview(n)).length ? 'Select none' : 'Select all'}</button>` : ''}
             ${promotion ? `<label class="ingest-check" style="margin:0" title="Also list pages that haven't changed since they were promoted, to send one again"><input type="checkbox" data-action="show-promoted" ${showPromoted ? 'checked' : ''}> Show already promoted</label>` : ''}

@@ -32,6 +32,8 @@ APP = SESSIONS_DIR.parent               # App Files
 PROJECT = APP.parent
 SB = SESSIONS_DIR / "sb.py"
 RUN_PY = APP / "ingest" / "run.py"
+sys.path.insert(0, str(APP / "host"))
+import pathlist  # noqa: E402  (root_key: how a wiki's role is keyed)
 
 
 def write(path: Path, text: str) -> None:
@@ -118,6 +120,12 @@ def fresh_case(base: Path, case_dir: Path) -> None:
         shutil.rmtree(case_dir)
     shutil.copytree(base / ".wiki", case_dir / ".wiki")
     shutil.copytree(base / "personal", case_dir / "personal")
+    # The case's open wikis, as the app saves them, and their roles as Settings saves them:
+    # "personal" is the personal wiki and "team" the team wiki (pathlist.wiki_roles).
+    wikis = {"personal": case_dir / "personal", "team": case_dir / "team"}
+    write(case_dir / ".wiki" / "settings.json", json.dumps({"workspace": [{"alias": a, "root": str(r)} for a, r in wikis.items()]}))
+    write(case_dir / ".wiki" / "wiki-settings.json", json.dumps({"version": 1, "roles": {
+        pathlist.root_key(r): {"role": a, "root": str(r), "alias": a} for a, r in wikis.items()}}))
 
 
 def state_of(page: Path) -> tuple[str, str]:

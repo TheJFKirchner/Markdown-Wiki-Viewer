@@ -1668,3 +1668,17 @@ button[data-ai]:disabled { cursor: not-allowed; }
   .conflict-sides { grid-template-columns: minmax(0, 1fr); }
   .ingest-submit { position: static; }
 }
+.setup-group { margin: 4px 0; }
+
+/* ---- Wiki roles, session names ---------------------------------------------------------- */
+.role-badge { flex: none; padding: 0 6px; border-radius: 4px; font-size: 10px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; background: var(--bg-hover); color: var(--text-muted); cursor: help; }
+.role-badge.role-personal { background: rgba(167, 139, 250, 0.18); color: var(--accent-text); }
+.role-badge.role-team { background: rgba(96, 165, 250, 0.16); color: #60a5fa; }
+.session-subtitle { color: var(--text-muted); }
+.role-hint { margin: 0 0 14px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; color: var(--text-muted); line-height: 1.5; }
+.role-hint p { margin: 0 0 8px; }
+
+/* One look for every disabled control, so it reads as disabled wherever it is. */
+button:disabled, select:disabled { opacity: 0.45 !important; cursor: not-allowed !important; filter: none !important; }
+.settings-notes { margin: 4px 0; font-size: 12.5px; }
+.session-subagents { color: var(--accent-text); }

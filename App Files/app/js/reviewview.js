@@ -12,6 +12,7 @@
 //   Links go by page name, so moving or merging a page never leaves a broken link.
 // The work is done by sessions/sb.py, run by the host. See sessions/README.md.
 
+import { rolePrompt } from './roles.js';
 import { SONNET, chosenModel, modelMenu, rememberModel } from './modelmenu.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -54,10 +55,10 @@ export function createReviewView(container, deps) {
     draw();
     try {
       const status = await call('sessionsStatus', { root: folder.root });
-      topics = status.personal ? await call('reviewList', { root: folder.root }) : null;
-      folders = status.personal ? await call('suggestFolders', { root: folder.root }) : [];
-      conflicts = status.personal ? await call('listConflicts', {}).catch(() => []) : [];
-      error = status.personal ? '' : 'setup';
+      topics = status.set_up ? await call('reviewList', { root: folder.root }) : null;
+      folders = status.set_up ? await call('suggestFolders', { root: folder.root }) : [];
+      conflicts = status.set_up ? await call('listConflicts', {}).catch(() => []) : [];
+      error = status.set_up ? '' : 'setup';
       loadedFor = folder.root;
     } catch (err) {
       error = err.message;
@@ -98,7 +99,7 @@ export function createReviewView(container, deps) {
   }
 
   function left(folder) {
-    if (!folder) return '<p class="ingest-empty">Choose your personal wiki in the Sessions tab first.</p>';
+    if (!folder) return rolePrompt('personal');
     if (error === 'setup') return `<p class="ingest-empty">${esc(folder.alias)} isn't set up as your personal wiki yet. Set it up in the Sessions tab.</p>`;
     if (error) return `<div class="ingest-setup"><p class="field-error">${esc(error)}</p><button class="secondary-button" data-action="refresh">Try again</button></div>`;
     if (!topics) return `<p class="ingest-empty">${loading ? 'Reading your topics…' : ''}</p>`;

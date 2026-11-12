@@ -105,6 +105,9 @@ async def promote(job: dict, run_folder: Path, prepare_only: bool = False) -> in
         return stop(f'This run is for the team wiki manager only, not "{job["agent"]}".')
     if not job.get("targets"):
         return stop("Choose a wiki to promote into: the job names no target wiki.")
+    refused = target_refusal(wikis, job["targets"])
+    if refused:
+        return stop(refused)
     missing = [n for n in note_ids if n not in wikis.pages]
     if missing:
         return stop("These pages weren't found: " + ", ".join(missing))
@@ -303,6 +306,18 @@ async def talk_to_agent(agent: Agent, message: str, transcript: Transcript, resu
             transcript.prices = prices_for(reply.model)
         session_id = reply.session_id or session_id
     return reply, error, session_id
+
+
+def target_refusal(wikis: Wikis, targets: list) -> str:
+    """Why these targets can't be promoted into, in plain words, or "". Only the wiki whose role is
+    "team" (Settings; pathlist.wiki_roles) can be: a view-only or personal wiki never gets cards."""
+    for alias in targets:
+        if alias not in wikis.roots:
+            return f'"{alias}" isn\'t one of the wikis in this run.'
+        role = pathlist.wiki_role_for_root(wikis.roots[alias])
+        if role != "team":
+            return pathlist.role_refusal(alias, role, "team")
+    return ""
 
 
 def how_it_ended(reply, error: str) -> tuple[bool, str]:

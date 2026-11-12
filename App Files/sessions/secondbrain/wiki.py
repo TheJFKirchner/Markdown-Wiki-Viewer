@@ -1,7 +1,8 @@
 """All file writes to the personal wiki. Models produce text; this module places it.
 
-Layout of a personal wiki:
-    WIKI.md               marks the folder as a personal wiki (type: personal)
+Layout of a personal wiki (in WikiApp, the open wiki whose role is "personal"):
+    WIKI.md               marks the folder as a personal wiki (type: personal) for the command line
+                          on its own; in WikiApp the role decides, and Set up doesn't make it
     wiki_rules.md         optional rules for the agents that work in this wiki
     index.md              one line per topic, grouped by folder, regenerated from the topic pages
     promotion-queue.md    data findings waiting to be promoted to the team wiki
@@ -165,8 +166,65 @@ def slugify(text: str, limit: int = 60) -> str:
     return slug[:limit].strip("-") or "untitled"
 
 
+def app_role(root: Path) -> str | None:
+    """The wiki's role in WikiApp ("personal", "team" or "view"), or None when WikiApp has no say:
+    no private folder (the command line on its own), or a folder that isn't one of the open wikis."""
+    try:
+        from .config import pathlist
+        return pathlist.wiki_role_for_root(root)
+    except Exception:  # the path list can't be read: as on the command line on its own
+        return None
+
+
+def _personal_by_role(root: Path) -> bool:
+    """True when WikiApp says root is the personal wiki; False when WikiApp has no say (then a
+    WIKI.md saying type: personal decides). Raises WikiError when WikiApp says it isn't: a team or
+    view-only wiki, or a folder outside the open wikis while another is the personal wiki."""
+    role = app_role(root)
+    if role == "personal":
+        return True
+    try:
+        from .config import pathlist
+        if role is not None:
+            raise WikiError(pathlist.role_refusal(pathlist.alias_of_root(root), role, "personal"))
+        other = pathlist.wiki_with_role("personal")
+    except WikiError:
+        raise
+    except Exception:
+        return False
+    if other:
+        raise WikiError(f"{root} isn't your personal wiki ({other['alias']} is). Notes and sessions are only "
+                        "captured into your personal wiki; choose it in Settings.")
+    return False
+
+
+def is_personal(root: Path) -> bool:
+    """Whether writes to root are allowed (see require_personal), without raising."""
+    try:
+        if _personal_by_role(root):
+            return True
+    except WikiError:
+        return False
+    try:
+        return (root / "WIKI.md").exists() and read_page(root / "WIKI.md")[0].get("type") == "personal"
+    except OSError:
+        return False
+
+
 def require_personal(root: Path) -> dict:
-    """Refuse to write anywhere that has not been marked as a personal wiki."""
+    """Refuse to write anywhere but the personal wiki. In WikiApp that is the open wiki whose role is
+    "personal" (Settings): a team or view-only wiki is refused, and its WIKI.md is not needed or
+    read. Without WikiApp (the command line on its own) it is a folder whose WIKI.md says type: personal."""
+    if _personal_by_role(root):
+        meta = {}
+        if (root / "WIKI.md").exists():
+            try:
+                meta = read_page(root / "WIKI.md")[0]
+            except (OSError, UnicodeDecodeError):
+                meta = {}
+        upgrade_layout(root)
+        meta["_rules"] = ""
+        return meta
     cfg_file = root / "WIKI.md"
     if not cfg_file.exists():
         raise WikiError(f"{root} has no WIKI.md. Run 'sb.py init' to set it up as a personal wiki.")
@@ -176,8 +234,9 @@ def require_personal(root: Path) -> dict:
             f"{root} is marked type '{meta.get('type')}', not 'personal'. Sessions are only ever written to a personal wiki."
         )
     upgrade_layout(root)
-    rules_file = root / "wiki_rules.md"  # the same per-wiki rules the app's other agents follow
-    meta["_rules"] = read_page(rules_file)[1].strip() if rules_file.exists() else ""
+    # The personal wiki's rules are the person's capture rules file (the path list's
+    # personal_capture_rules, sent by prompts.personal_rules_section), not a file in the wiki.
+    meta["_rules"] = ""
     return meta
 
 
@@ -914,19 +973,30 @@ def update_queue(root: Path, date: str, note_stem: str, findings: list[dict]) ->
 # ---------- setup and team index ----------
 
 def init_personal(root: Path, template: str) -> list[str]:
+    """Set up: the personal wiki's pages, where missing. -> exactly what was created, in the wiki,
+    in this order: "WIKI.md" (on the command line on its own only), "Sessions/" (the records'
+    folder), "promotion-queue.md", "index.md". In WikiApp the wiki's role makes it personal, so no WIKI.md is made
+    (an existing one is left alone); a team or view-only wiki is refused before anything is written."""
     created = []
+    by_role = _personal_by_role(root)
     cfg_file = root / "WIKI.md"
-    if cfg_file.exists():
-        require_personal(root)
-    else:
-        write_text(cfg_file, template)
-        created.append("WIKI.md")
-    (root / SESSIONS_DIR).mkdir(parents=True, exist_ok=True)
+    if not by_role:
+        if cfg_file.exists():
+            require_personal(root)   # the command line on its own: WIKI.md must say type: personal
+        else:
+            write_text(cfg_file, template)
+            created.append("WIKI.md")
+    if not (root / SESSIONS_DIR).is_dir():
+        (root / SESSIONS_DIR).mkdir(parents=True, exist_ok=True)
+        created.append(SESSIONS_DIR + "/")
     state_dir(root)
+    had_index = (root / "index.md").exists()
     if not (root / "promotion-queue.md").exists():
         write_text(root / "promotion-queue.md", _queue_page())
         created.append("promotion-queue.md")
     write_index(root)
+    if not had_index:
+        created.append("index.md")
     return created
 
 

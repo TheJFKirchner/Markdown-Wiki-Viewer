@@ -4,6 +4,8 @@
 //   Duplicates  dashed lines joining same-named notes from different folders
 //   Tags        pick tags to filter the graph, change each tag's color
 
+import { roleOf, ROLE_LABEL } from './roles.js';
+
 const CHEVRON = '<svg class="chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>';
 const COLOR_MODES = [['folder', 'Folder'], ['tag', 'Tag'], ['none', 'None']];
 
@@ -148,6 +150,10 @@ export function createGraphPanel(root, { tagColors, onChange, onFolderChange }) 
       ...folders.map((folder) => {
         const row = swatchRow('folder-row' + (folder.hidden ? ' hidden-folder' : ''), folder.color, folder.alias, folder.count);
         row.dataset.alias = folder.alias;
+        const role = document.createElement('span');
+        role.className = `role-badge role-${roleOf(folder.alias)}`;
+        role.textContent = ROLE_LABEL[roleOf(folder.alias)];
+        row.querySelector('.row-name').after(role);
         row.title = folder.hidden ? 'Hidden from the graph. Click to show.' : 'Click to hide from the graph';
         return row;
       }),

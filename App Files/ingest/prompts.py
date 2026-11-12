@@ -1,7 +1,8 @@
 """The text the agent is given: its instructions, its first message, and a feedback message.
 
   agent_prompt()            the agent's own prompt file (agents/agentfiles.py).
-  write_instructions()      the instructions (the "system prompt"): that prompt, then each wiki's rules.
+  write_instructions()      the instructions (the "system prompt"): that prompt, then each wiki's role,
+                            and the team wiki's rules (the only rules file Promotion is sent).
   write_first_message()     the first message: today's date, each wiki's index, then the personal pages.
   write_feedback_message()  the message that continues a run with the reviewer's feedback.
   write_answers_message()   the message that continues a promotion with the reviewer's answers.
@@ -38,12 +39,29 @@ def wikis_section() -> str:
     return pathlist.read_prompt("prompt.wikis-section").strip()
 
 
+ROLE_NOTES = {   # after each wiki's heading: what the agent may do there (its role in Settings)
+    "team": "the team wiki: the only wiki you propose changes to",
+    "personal": "the personal wiki: where the pages come from; read only",
+    "view": "view only: read it for context; never propose changes or new pages for it",
+}
+
+
 def write_instructions(wikis: Wikis, prompt: str, today: str) -> str:
+    """The prompt, the Wikis section, then one heading per open wiki naming its role. Only the team
+    wiki's heading is followed by its rules file: it is the only wiki changes are proposed to. The
+    personal wiki's rules are the capture rules (never sent to Promotion), and a view-only wiki's
+    rules file is not used (its pages can still be read for context)."""
     rules = []
     for alias in wikis.aliases:
+        root = (getattr(wikis, "roots", None) or {}).get(alias)
+        role = (pathlist.wiki_role_for_root(root) if root else None) or "view"
+        heading = f'### Wiki "{alias}" ({ROLE_NOTES[role]})'
+        if role != "team":
+            rules.append(heading)
+            continue
         text = wikis.rules_text(alias)
         text = text.strip() if text is not None else "No rules file. Follow the existing pages' style."
-        rules.append(f'### Wiki "{alias}"\n\n<rules>\n{text}\n</rules>')
+        rules.append(f"{heading}\n\n<rules>\n{text}\n</rules>")
     return prompt.strip().replace("{{date}}", today) + "\n\n" + wikis_section() + "\n\n" + "\n\n".join(rules) + "\n"
 
 

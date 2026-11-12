@@ -89,7 +89,7 @@ def _charge(root, kind: str) -> None:
 
 def review_topic(cfg, slug: str) -> dict:
     root = cfg.personal
-    rules = wiki.require_personal(root)["_rules"]
+    wiki.require_personal(root)
     path = wiki.find_topic(root, slug)
     if not path:
         raise FileNotFoundError(f"No topic page for '{slug}'")
@@ -115,8 +115,7 @@ def review_topic(cfg, slug: str) -> dict:
     prompt = prompts.build("wiki-reviewer", [
         ("This request", prompts.request_text("review", today=today, slug=slug, title=meta.get("title") or slug,
                                               tags=", ".join(current_tags) or "none", kind=meta.get("kind") or "topic")),
-        ("This wiki's rules", rules or "(none)"),
-        *prompts.personal_rules_section(),
+        *prompts.personal_rules_section(),   # the personal wiki's only rules: the capture rules file
         ("Existing topics", wiki.index_text(root) or "(none)"),
         *tagset.prompt_sections(),
         ("The analyst's own notes on this topic (note level, `notes-section`)", own_notes or "(none)"),
@@ -320,7 +319,7 @@ def suggest_merges(cfg) -> list[dict]:
     """Ask the reviewer which topics are the same work, and which tags the same theme.
     Nothing is changed here. -> [{kind: "topic"|"tag", keep, merge: [...], reason}]"""
     root = cfg.personal
-    rules = wiki.require_personal(root)["_rules"]
+    wiki.require_personal(root)
     topics = wiki.topic_pages(root)
     tags = wiki.all_tags(root)
     if len(topics) < 2:
@@ -331,7 +330,6 @@ def suggest_merges(cfg) -> list[dict]:
     tagset = taglists.TagSet(root)
     prompt = prompts.build("wiki-reviewer", [
         ("This request", prompts.request_text("merges", today=datetime.now().date().isoformat())),
-        ("This wiki's rules", rules or "(none)"),
         *prompts.personal_rules_section(),   # e.g. "every client its own page": two clients are not duplicates
         *tagset.prompt_sections(),
         ("Topics", listing),

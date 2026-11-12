@@ -16,17 +16,22 @@ they derive from the `.wiki` folder. Entries:
 
     app folder      app_folder, pointer_file, path_list
     app data        settings, window_placement, instance, engine_settings, pending_promotion,
-                    run_history, indexes, progress, prompts, templates, starters
-    your own files  personal_capture_rules (USER_FILES below): free-text rules for capture in the
-                    personal wiki. A starter is copied in once if missing; never updated,
-                    overwritten or reset; no status. personal_tags (the person's own tags, a page
-                    in the personal wiki, made by the sessions tool when the first one is added).
-    prompt slots    prompt.<...> and template.<...> (SLOTS below): a text file the app ships a
-                    default for. The default is copied into the folder only where the file is
-                    missing. Each slot has a status: "default" (an unedited copy, which follows
-                    the app's newer defaults by itself), "customised", or
-                    "customised_newer_default" (edited, and the app now ships a different
-                    default). reset_prompt() puts the shipped default back.
+                    run_history, indexes, progress, note_templates, prompts, wiki_settings (each
+                    wiki's role and the Sessions tab's filter: see "Wiki roles" below)
+    your own files  personal_capture_rules (.wiki/capture-rules.md): free-text rules for capture in
+                    the personal wiki, the one place for them. A starter is copied in once if
+                    missing; never updated, overwritten or reset; no status. personal_tags (the
+                    person's own tags, a page in the personal wiki, made by the sessions tool when
+                    the first one is added).
+    file slots      three tiers (see MAIN_SLOTS, ADVANCED_SLOTS, INTERNAL below):
+                    main: template.daily, template.weekly, copied into .wiki/note-templates/ where
+                      missing; status "default" (unedited, follows newer defaults by itself),
+                      "customised", "customised_newer_default"; reset_prompt() puts the default back.
+                    advanced: the three agents' prompts, read from the app's own files ("built_in")
+                      until customise_prompt() makes an editable copy in .wiki/prompts/;
+                      reset_prompt() deletes the copy.
+                    internal: request wording, samples, starters: never copied or listed, read
+                      from the app's files by read_prompt().
     each wiki       wiki.<alias>.rules, wiki.<alias>.templates, wiki.<alias>.index,
                     wiki.<alias>.progress
     outside         notes_folder, transcripts, agentlib, sessions_config, tag_list_reference (unset
@@ -141,42 +146,86 @@ APP_DATA = [
     ("run_history", "Past ingest runs", "folder", "ingest-runs", True),
     ("indexes", "Wiki indexes (one per wiki, rebuilt on each run)", "folder", "indexes", True),
     ("progress", "Progress (session capture ledger and spend, per wiki)", "folder", "progress", True),
-    ("prompts", "Prompts folder", "folder", "prompts", True),
-    ("templates", "Private templates (for wikis without a Templates folder)", "folder", "templates", True),
-    ("starters", "Starters for new files", "folder", "starters", True),
+    ("note_templates", "Note templates (the New note menu)", "folder", "note-templates", True),
+    ("prompts", "Customised agent prompts (advanced)", "folder", "prompts", True),
+    ("wiki_settings", "Wiki roles (personal, team, view only) and the Sessions filter", "file", "wiki-settings.json", True),
 ]
 _APP_DATA = {row[0]: row for row in APP_DATA}
 
-# Prompt slots: (name, label, kind, group, parent entry, file inside it, shipped default in App Files).
-SLOTS = [
-    ("prompt.executive-assistant", "Executive assistant (Sessions tab)", "prompt", "Prompts", "prompts", "executive-assistant.md", "agents/executive-assistant/SKILL.md"),
-    ("prompt.wiki-reviewer", "Wiki reviewer (Review tab)", "prompt", "Prompts", "prompts", "wiki-reviewer.md", "agents/wiki-reviewer/SKILL.md"),
-    ("prompt.team-wiki-manager", "Team wiki manager (Promotion tab)", "prompt", "Prompts", "prompts", "team-wiki-manager.md", "agents/team-wiki-manager/SKILL.md"),
-    ("prompt.promotion-first-message", "Promotion run: first message", "prompt", "Prompts", "prompts", "promotion-first-message.md", "agents/messages/promotion-first-message.md"),
-    ("prompt.ingest-feedback", "Promotion: feedback message", "prompt", "Prompts", "prompts", "ingest-feedback.md", "agents/messages/ingest-feedback.md"),
-    ("prompt.ingest-answers", "Promotion: answers message", "prompt", "Prompts", "prompts", "ingest-answers.md", "agents/messages/ingest-answers.md"),
-    ("prompt.wikis-section", "Promotion: the Wikis section","prompt", "Prompts", "prompts", "wikis-section.md", "agents/messages/wikis-section.md"),
-    ("prompt.sessions-capture", "Sessions: capture request", "prompt", "Prompts", "prompts", "sessions-capture.md", "agents/messages/sessions-capture.md"),
-    ("prompt.sessions-notes-capture", "Notes: capture request (a note into the personal wiki)", "prompt", "Prompts", "prompts", "sessions-notes-capture.md", "agents/messages/sessions-notes-capture.md"),
-    ("prompt.sessions-review", "Review: topic review request", "prompt", "Prompts", "prompts", "sessions-review.md", "agents/messages/sessions-review.md"),
-    ("prompt.sessions-merges", "Review: merge suggestions request", "prompt", "Prompts", "prompts", "sessions-merges.md", "agents/messages/sessions-merges.md"),
-    ("template.daily", "Daily note", "template", "Templates", "templates", "Notes/Daily.md", "app/templates/Notes/Daily.md"),
-    ("template.weekly", "Weekly note", "template", "Templates", "templates", "Notes/Weekly.md", "app/templates/Notes/Weekly.md"),
-    ("template.sample-note", "Sample note template", "template", "Templates", "templates", "Notes/Sample note.md", "app/templates/Notes/Sample note.md"),
-    ("template.sample-page", "Sample page template", "template", "Templates", "templates", "Pages/Sample page.md", "app/templates/Pages/Sample page.md"),
-    ("template.page-starter", "Starter for a new page template", "template", "Templates", "starters", "page-template.md", "app/templates/starters/page-template.md"),
-    ("template.rules-starter", "Starter for a wiki's rules", "template", "Templates", "starters", "wiki-rules.md", "app/templates/starters/wiki-rules.md"),
-    ("template.personal-wiki", "Personal wiki marker (WIKI.md)", "template", "Templates", "starters", "personal-WIKI.md", "sessions/templates/personal-WIKI.md"),
-    ("template.team-rules", "Starter for a team wiki's rules", "template", "Templates", "starters", "team-wiki_rules.md", "sessions/templates/team-wiki_rules.md"),
+# File slots come in three tiers.
+#   main      copied into .wiki on setup and shown in Settings: what a person actually edits.
+#   advanced  shown in Settings, but read straight from the app's shipped file until the person
+#             asks for an editable copy (customise_prompt); reset_prompt removes the copy again.
+#   internal  never copied, never listed: always read from the shipped file (read_prompt works).
+NOTE_TEMPLATES_DIR = "note-templates"   # the note templates' folder inside .wiki: change it here only
+CAPTURE_RULES_FILE = "capture-rules.md"  # the personal capture rules, at the top of .wiki
+LAYOUT_VERSION = 2                       # paths.json "layout": 2 once an older .wiki has been tidied
+
+# Slots: (name, label, kind, group, parent entry, file inside it, shipped default in App Files).
+MAIN_SLOTS = [
+    ("template.daily", "Daily note", "template", "Note templates", "note_templates", "Daily.md", "app/templates/Notes/Daily.md"),
+    ("template.weekly", "Weekly note", "template", "Note templates", "note_templates", "Weekly.md", "app/templates/Notes/Weekly.md"),
 ]
+ADVANCED_SLOTS = [
+    ("prompt.executive-assistant", "Executive assistant's prompt (Notes and Sessions tabs)", "prompt", "Agent prompts (advanced)", "prompts", "executive-assistant.md", "agents/executive-assistant/SKILL.md"),
+    ("prompt.wiki-reviewer", "Wiki reviewer's prompt (Review tab)", "prompt", "Agent prompts (advanced)", "prompts", "wiki-reviewer.md", "agents/wiki-reviewer/SKILL.md"),
+    ("prompt.team-wiki-manager", "Team wiki manager's prompt (Promotion tab)", "prompt", "Agent prompts (advanced)", "prompts", "team-wiki-manager.md", "agents/team-wiki-manager/SKILL.md"),
+]
+SLOTS = MAIN_SLOTS + ADVANCED_SLOTS
 _SLOTS = {row[0]: row for row in SLOTS}
+_ADVANCED = {row[0] for row in ADVANCED_SLOTS}
+
+# Internal: name -> shipped file in App Files. The wording wrapped around each request, the samples
+# and the one-time starters. read_prompt(name) reads them; nothing else about them can change.
+INTERNAL = {
+    "prompt.promotion-first-message": "agents/messages/promotion-first-message.md",
+    "prompt.ingest-feedback": "agents/messages/ingest-feedback.md",
+    "prompt.ingest-answers": "agents/messages/ingest-answers.md",
+    "prompt.wikis-section": "agents/messages/wikis-section.md",
+    "prompt.sessions-capture": "agents/messages/sessions-capture.md",
+    "prompt.sessions-notes-capture": "agents/messages/sessions-notes-capture.md",
+    "prompt.sessions-review": "agents/messages/sessions-review.md",
+    "prompt.sessions-merges": "agents/messages/sessions-merges.md",
+    "template.sample-note": "app/templates/Notes/Sample note.md",
+    "template.sample-page": "app/templates/Pages/Sample page.md",
+    "template.page-starter": "app/templates/starters/page-template.md",
+    "template.rules-starter": "app/templates/starters/wiki-rules.md",
+    "template.team-rules": "sessions/templates/team-wiki_rules.md",
+}
+# Internal slots no longer in use, with the shipped file an older copy is compared with when an
+# older .wiki is tidied (upgrade_layout). template.personal-wiki: the app doesn't make WIKI.md any
+# more (a wiki's role decides); only sb.py on its own reads the file, in place.
+RETIRED_INTERNAL = {"template.personal-wiki": "sessions/templates/personal-WIKI.md"}
+
+# Where the first layout (before the tiers) kept each now-internal or retired file, inside .wiki.
+# On the first start of this version an unedited copy is removed; an edited one is left, unread,
+# and listed once as a leftover (upgrade_layout).
+OLD_LAYOUT = {
+    **{name: "prompts/" + Path(file).name for name, file in INTERNAL.items() if name.startswith("prompt.")},
+    "prompt.tasks": "prompts/TASKS.md",
+    "prompt.note-taker": "prompts/note-taker.md",
+    "prompt.ingest-first-message": "prompts/ingest-first-message.md",
+    "template.sample-note": "templates/Notes/Sample note.md",
+    "template.sample-page": "templates/Pages/Sample page.md",
+    "template.page-starter": "starters/page-template.md",
+    "template.rules-starter": "starters/wiki-rules.md",
+    "template.personal-wiki": "starters/personal-WIKI.md",
+    "template.team-rules": "starters/team-wiki_rules.md",
+}
+# Files that moved: name -> where the first layout kept them.
+OLD_MOVES = {
+    "template.daily": "templates/Notes/Daily.md",
+    "template.weekly": "templates/Notes/Weekly.md",
+    "personal_capture_rules": "prompts/personal-capture-rules.md",
+}
+LEFTOVERS_FILE = "leftovers.json"
 
 # The person's own files: (name, label, kind, group, parent entry, file inside it, starter in App Files).
 # Not defaults: the starter is copied in once, only where the file is missing, and never updated,
 # overwritten or reset. No status. read_prompt() gives the text without <!-- comments -->.
 USER_FILES = [
     ("personal_capture_rules", "My capture rules (personal wiki: what to pick out, what gets its own page)",
-     "user_prompt", "Prompts", "prompts", "personal-capture-rules.md", "agents/messages/personal-capture-rules.md"),
+     "user_prompt", "Rules", "app_folder", CAPTURE_RULES_FILE, "agents/messages/personal-capture-rules.md"),
     # Your own tags, a normal page in the personal wiki (parent "personal_wiki": the folder picked
     # in the Sessions tab). Never made up front: sync_slots never writes it (it is outside the
     # .wiki folder), and sessions/secondbrain/tags.py makes it the first time a new tag is added.
@@ -210,7 +259,8 @@ OPTIONAL = {"tag_list_reference"}
 # Entries the app (or the sessions tool) makes the first time it needs them; until then their
 # state is "not_created", not "missing". Each wiki's index and progress folder are too.
 CREATED_ON_USE = {"settings", "window_placement", "instance", "engine_settings", "pending_promotion", "run_history",
-                  "indexes", "progress", "path_list", "personal_tags", "notes_folder", "sessions_config"}
+                  "indexes", "progress", "path_list", "personal_tags", "notes_folder", "sessions_config", "prompts",
+                  "wiki_settings"}
 
 # A row's state in the Paths window:
 #   ok           it is there
@@ -304,10 +354,18 @@ class Resolver:
             return self.personal_root()
         if name == "tag_list_reference":
             return None   # unset until the person points it at a file
+        if name in INTERNAL:
+            return APP_FILES / INTERNAL[name]
+        if name in _ADVANCED:
+            return APP_FILES / _SLOTS[name][6]   # built in: the shipped file, until customised
         if name in _SLOTS or name in _USER:
             row = _SLOTS.get(name) or _USER[name]
             parent = self.path(row[4])
-            return parent / row[5] if parent else None
+            found = parent / row[5] if parent else None
+            if name in OLD_MOVES and found is not None and not found.exists() and self.folder is not None \
+                    and self.record.get("layout", 1) < LAYOUT_VERSION and (self.folder / OLD_MOVES[name]).is_file():
+                return self.folder / OLD_MOVES[name]   # not tidied yet (the app hasn't started since): the old place
+            return found
         if name == "transcripts":
             return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
         if name == "agentlib":
@@ -331,14 +389,32 @@ class Resolver:
         if part == "templates":
             if root is not None and (root / "Templates").is_dir():
                 return root / "Templates"   # a wiki with its own Templates folder keeps using it
-            return self.path("templates")
+            return None   # none: the note templates come from note_templates, and no page templates
         folder = self.path("indexes" if part == "index" else "progress")
         if folder is None:
             return None
         return folder / (safe_name(alias) + (".md" if part == "index" else ""))
 
     def path(self, name: str) -> Path | None:
-        return self.legacy(name) or self.override(name) or self.default(name)
+        if name in INTERNAL:
+            return APP_FILES / INTERNAL[name]   # always the shipped file
+        found = self.legacy(name) or self.override(name)
+        if found is None and name in _ADVANCED:
+            copy = self.copy_path(name)
+            found = copy if copy is not None and copy.is_file() else None
+        return found or self.default(name)
+
+    def copy_path(self, name: str) -> Path | None:
+        """Where an advanced slot's editable copy goes (.wiki/prompts/<file>), made or not."""
+        parent = self.path("prompts")
+        return parent / _SLOTS[name][5] if parent else None
+
+    def has_copy(self, name: str) -> bool:
+        """An advanced slot reads from the person's own file (a copy, an override, the old test folder)."""
+        if self.legacy(name) or self.is_overridden(name):
+            return True
+        copy = self.copy_path(name)
+        return copy is not None and copy.is_file()
 
     def wiki_root(self, alias: str) -> Path | None:
         for wiki in self.workspace:
@@ -355,12 +431,13 @@ class Resolver:
         return bool(self.record["overrides"].get(name))
 
     def personal_root(self) -> Path | None:
-        """The personal wiki's folder: the workspace folder picked in the Sessions tab (the
-        sessionsWiki setting), else the one with the alias "personal"."""
-        alias = read_settings(self.folder).get("sessionsWiki")
-        found = next((w for w in self.workspace if isinstance(alias, str) and w["alias"] == alias), None) \
-            or next((w for w in self.workspace if w["alias"].lower() == "personal"), None)
+        """The personal wiki's folder: the open wiki whose role is "personal" (see wiki_roles)."""
+        roles = _roles_by_alias(self.folder, self.workspace)
+        found = next((w for w in self.workspace if roles.get(w["alias"]) == "personal"), None)
         return Path(found["root"]) if found else None
+
+    def role(self, alias: str) -> str:
+        return _roles_by_alias(self.folder, self.workspace).get(alias, "view")
 
 
 def path(name: str) -> Path | None:
@@ -415,27 +492,58 @@ def progress_dir(root: str | os.PathLike, alias: str | None = None) -> Path:
 # ---- The list, for the app's Paths window -------------------------------------------------------
 
 def list_paths(workspace: list | None = None) -> list[dict]:
-    """Every entry: {name, label, path, exists, kind, group, status, default, state, can_reset,
-    can_change, can_clear, overridden}. status is only set for prompt and template slots; state
-    is one of STATES; can_clear is true for an optional entry (no default) that has a value."""
+    """Every entry the person can see: {name, label, path, exists, kind, group, tier, status,
+    default, state, can_reset, can_customise, can_change, can_clear, overridden}. Internal slots are
+    not listed. Order: the rules (the main way to customise: the capture rules, then each wiki's rules
+    file), the note templates, everything else, and the advanced agent prompts last.
+    tier: "main" or "advanced". status: main slots "default" | "customised" |
+    "customised_newer_default"; advanced slots "built_in" | "customised" | "customised_newer_default";
+    None otherwise. state: one of STATES. can_clear: an optional entry (no default) that has a value.
+    can_customise: an advanced slot still read from the app's own file.
+    A wiki's rows (wiki.<alias>.*) also have role: "personal" | "team" | "view". Only the team wiki
+    has a rules row; a view-only wiki has no progress row."""
     resolver = Resolver(workspace=workspace)
-    out = [_entry(resolver, "app_folder", "WikiApp's private folder", "folder", "App folder", False),
-           _entry(resolver, "pointer_file", "Where the private folder is recorded", "file", "App folder", False),
-           _entry(resolver, "path_list", "This list's changes (paths.json)", "file", "App folder", False)]
+    user = {row[0]: row for row in USER_FILES}
+    out = [_entry(resolver, "personal_capture_rules", user["personal_capture_rules"][1], "user_prompt", "Rules", True)]
+    # A wiki's rows carry its role. Only the team wiki has a rules row: its rules file is the only
+    # one any agent is sent (Promotion); a personal wiki's rules are the capture rules above, and a
+    # view-only wiki's are never used. A view-only wiki has no progress row either (nothing is
+    # captured there); its templates (the New note menu) and its index (read for context) stay.
+    roles = {w["alias"]: resolver.role(w["alias"]) for w in resolver.workspace}
+    for wiki in resolver.workspace:
+        if roles[wiki["alias"]] != "team":
+            continue
+        label, kind = WIKI_PARTS["rules"]
+        out.append({**_entry(resolver, f"wiki.{wiki['alias']}.rules", f"{wiki['alias']} wiki rules", kind, "Rules", True),
+                    "role": roles[wiki["alias"]]})
+    for name, label, kind, group, *_ in MAIN_SLOTS:
+        out.append(_entry(resolver, name, label, kind, group, True))
+    out += [_entry(resolver, "app_folder", "WikiApp's private folder", "folder", "App folder", False),
+            _entry(resolver, "pointer_file", "Where the private folder is recorded", "file", "App folder", False),
+            _entry(resolver, "path_list", "This list's changes (paths.json)", "file", "App folder", False)]
     for name, label, kind, _, can_change in APP_DATA:
         out.append(_entry(resolver, name, label, kind, "App data", can_change))
-    for name, label, kind, group, *_ in SLOTS + USER_FILES:
-        out.append(_entry(resolver, name, label, kind, group, True))
+    for name, label, kind, group, *_ in USER_FILES:
+        if name != "personal_capture_rules":
+            out.append(_entry(resolver, name, label, kind, group, True))
     for wiki in resolver.workspace:
+        role = roles[wiki["alias"]]
         for part, (label, kind) in WIKI_PARTS.items():
-            out.append(_entry(resolver, f"wiki.{wiki['alias']}.{part}", label, kind, f"Wiki: {wiki['alias']}", True))
+            if part == "rules" or (role == "view" and part == "progress"):
+                continue
+            out.append({**_entry(resolver, f"wiki.{wiki['alias']}.{part}", label, kind, f"Wiki: {wiki['alias']}", True),
+                        "role": role})
     for name, label, kind in OUTSIDE:
         out.append(_entry(resolver, name, label, kind, "Outside the app", True))
+    for name, label, kind, group, *_ in ADVANCED_SLOTS:
+        out.append(_entry(resolver, name, label, kind, group, True))
     return out
 
 
 def describe(name: str, workspace: list | None = None) -> dict:
-    """One entry, as list_paths() gives it."""
+    """One entry, as list_paths() gives it. (Internal slots have none.)"""
+    if name in INTERNAL:
+        raise ValueError(f"{name} is built into the app: it has no entry to show or change.")
     for entry in list_paths(workspace):
         if entry["name"] == name:
             return entry
@@ -460,11 +568,17 @@ def _entry(resolver: Resolver, name: str, label: str, kind: str, group: str, can
         exists = False
     else:
         exists = found.is_dir() if kind == "folder" else found.is_file()
+    if name in _ADVANCED:
+        can_reset = status in ("customised", "customised_newer_default") or (resolver.is_overridden(name) and not exists)
+    else:
+        can_reset = name in _SLOTS and (status != "default" or not exists)
     return {
         "name": name, "label": label, "path": str(found) if found else "", "exists": bool(exists), "kind": kind,
-        "group": group, "status": status, "default": str(default) if default else "",
+        "group": group, "tier": "advanced" if name in _ADVANCED else "main",
+        "status": status, "default": str(default) if default else "",
         "state": _state(resolver, name, found, bool(exists)),
-        "can_reset": name in _SLOTS and (status != "default" or not exists),
+        "can_reset": can_reset,
+        "can_customise": name in _ADVANCED and status == "built_in",
         "can_change": can_change and not (name in AGENT_SLOTS and resolver.legacy(name)),
         "can_clear": name in OPTIONAL and resolver.is_overridden(name),
         "overridden": resolver.is_overridden(name),
@@ -494,6 +608,8 @@ def set_path(name: str, new_path: str | None) -> dict:
     a file the app writes (settings, a wiki's rules or index...) at a place whose folder exists.
     Changing the .wiki folder itself is relocate() in appfolder.py, not this."""
     _check_name(name)
+    if name in INTERNAL:
+        raise ValueError(f"{name} is built into the app and can't be changed.")
     if name in ("app_folder", "pointer_file", "path_list", "instance"):
         raise ValueError("That one can't be changed here." + (" Use Move or Adopt to change the folder." if name == "app_folder" else ""))
     folder = require_app_folder()
@@ -560,7 +676,7 @@ def _kind_of(name: str) -> str:
 
 def _check_name(name: str) -> None:
     if not isinstance(name, str) or not (name in ("app_folder", "pointer_file", "path_list") or name in _APP_DATA
-                                         or name in _SLOTS or name in _USER or name in _OUTSIDE
+                                         or name in _SLOTS or name in _USER or name in _OUTSIDE or name in INTERNAL
                                          or _WIKI_NAME.match(name)):
         raise ValueError(f"Unknown path: {name}")
 
@@ -568,11 +684,14 @@ def _check_name(name: str) -> None:
 # ---- Prompt and template slots ------------------------------------------------------------------
 
 def slot_names() -> list[str]:
+    """The listed slots (main and advanced). Internal ones are in INTERNAL."""
     return [row[0] for row in SLOTS]
 
 
 def shipped_file(name: str) -> Path:
-    """A slot's shipped default, or a user file's starter."""
+    """A slot's shipped default, an internal file, or a user file's starter."""
+    if name in INTERNAL:
+        return APP_FILES / INTERNAL[name]
     if name in _USER:
         return APP_FILES / _USER[name][6]
     if name not in _SLOTS:
@@ -586,8 +705,12 @@ def shipped_text(name: str) -> str:
 
 
 def slot_status(name: str, resolver: Resolver | None = None) -> str | None:
-    """"default", "customised" or "customised_newer_default"; None when the file is missing."""
+    """Main slots: "default", "customised" or "customised_newer_default". Advanced slots: "built_in"
+    (read from the app's own file), "customised" or "customised_newer_default". None when the file
+    is missing."""
     resolver = resolver or Resolver()
+    if name in _ADVANCED and not resolver.has_copy(name):
+        return "built_in"
     found = resolver.path(name)
     if found is None or not found.is_file():
         return None
@@ -596,6 +719,12 @@ def slot_status(name: str, resolver: Resolver | None = None) -> str | None:
         shipped = shipped_text(name)
     except (OSError, UnicodeDecodeError):
         return None
+    if name in _ADVANCED:
+        info = resolver.record["slots"].get(name) or {}
+        base = None if resolver.legacy(name) else (info.get("override_base") if resolver.is_overridden(name) else info.get("base"))
+        if text != shipped and base and base != _hash(shipped):
+            return "customised_newer_default"
+        return "customised"
     if text == shipped:
         return "default"
     info = resolver.record["slots"].get(name) or {}
@@ -617,8 +746,11 @@ def read_prompt(name: str, **values) -> str:
     A user file (personal_capture_rules) reads without its <!-- comments --> and trimmed, so the
     untouched starter reads as "" (nothing to add); a missing one at its usual place also reads "".
     """
-    if name not in _SLOTS and name not in _USER:
+    if name not in _SLOTS and name not in _USER and name not in INTERNAL:
         raise ValueError(f"Not a prompt or template: {name}")
+    if name in INTERNAL:
+        text = shipped_text(name)
+        return fill(text, values) if values else text
     resolver = Resolver()
     found = resolver.path(name)
     if found is not None and found.is_file():
@@ -649,14 +781,54 @@ def fill(text: str, values: dict) -> str:
     return _PLACEHOLDER.sub(one, text)
 
 
+def customise_prompt(name: str) -> dict:
+    """An advanced slot (an agent's prompt): makes the editable copy in .wiki/prompts from the app's
+    shipped file, if there isn't one yet. From then on the agent reads the copy. -> the entry."""
+    if name not in _ADVANCED:
+        raise ValueError(f"Only an agent's prompt can be customised: {name}")
+    folder = require_app_folder()
+    with _lock:
+        record = load_record(folder)
+        resolver = Resolver(folder, record)
+        if not resolver.has_copy(name):
+            copy = resolver.copy_path(name)
+            ensure_parent(copy)
+            text = shipped_text(name)
+            with open(copy, "x", encoding="utf-8", newline="\n") as file:   # never over an existing file
+                file.write(text)
+            record["slots"][name] = {"base": _hash(text), "seeded": True}
+            save_record(record, folder)
+    return describe(name)
+
+
 def reset_prompt(name: str) -> dict:
-    """Replaces a slot's file with the shipped default. -> the entry. (Not for the person's own
-    files such as personal_capture_rules: those are never reset.)"""
+    """Main slot: replaces its file with the shipped default. Advanced slot (an agent's prompt):
+    deletes the editable copy (or forgets the file it was pointed at, which is left alone) and goes
+    back to the app's own file. -> the entry. (Not for the person's own files such as
+    personal_capture_rules, nor for internal ones.)"""
     if name in _USER:
         raise ValueError("That file is yours: it has no default to reset to.")
     if name not in _SLOTS:
         raise ValueError(f"Not a prompt or template: {name}")
     folder = require_app_folder()
+    if name in _ADVANCED:
+        with _lock:
+            record = load_record(folder)
+            resolver = Resolver(folder, record)
+            if resolver.is_overridden(name):
+                record["overrides"].pop(name, None)   # the person's own file stays where it is
+            else:
+                copy = resolver.copy_path(name)
+                if copy is not None and copy.is_file() and _inside(copy, folder):
+                    copy.unlink()
+                    if _norm_path(copy.parent) != _norm_path(folder):
+                        try:
+                            copy.parent.rmdir()   # the prompts folder, once nothing is customised (only when empty)
+                        except OSError:
+                            pass
+            record["slots"].pop(name, None)
+            save_record(record, folder)
+        return describe(name)
     with _lock:
         record = load_record(folder)
         resolver = Resolver(folder, record)
@@ -676,8 +848,12 @@ def reset_prompt(name: str) -> dict:
 def write_file(name: str, text: str, expect: str | None = None) -> dict:
     """Saves the text of a file entry (a prompt or template slot, a wiki's rules file...).
     expect: the text the caller last read; if the file changed since, nothing is written."""
+    if name in INTERNAL:
+        raise ValueError(f"{name} is built into the app and can't be changed.")
     if _kind_of(name) not in ("file", "prompt", "template", "user_prompt"):
         raise ValueError("That entry isn't a text file.")
+    if name in _ADVANCED and not Resolver().has_copy(name):
+        customise_prompt(name)   # never write into the app's own file: save into an editable copy
     resolver = Resolver()
     target = resolver.path(name)
     if target is None:
@@ -692,13 +868,16 @@ def write_file(name: str, text: str, expect: str | None = None) -> dict:
 
 
 def read_file(name: str) -> dict:
-    """{name, path, exists, text (None when missing), default_text (slots only)}"""
+    """{name, path, exists, text (None when missing), default_text (slots), starter_text (user
+    files), status}. Internal slots read too (their shipped text), for the page's starters."""
     resolver = Resolver()
     target = resolver.path(name)
     exists = bool(target) and target.is_file()
     out = {"name": name, "path": str(target) if target else "", "exists": exists,
            "text": _normalise(target.read_text(encoding="utf-8-sig")) if exists else None}
-    if name in _SLOTS:
+    if name in INTERNAL:
+        out.update({"default_text": out["text"], "status": None, "tier": "internal"})
+    elif name in _SLOTS:
         out["default_text"] = shipped_text(name)
         out["status"] = slot_status(name, resolver)
     elif name in _USER:
@@ -708,22 +887,29 @@ def read_file(name: str) -> dict:
 
 
 def sync_slots(folder: Path | None = None) -> dict:
-    """Run on each start: copies a slot's shipped default into the .wiki folder where its file has
-    never been made, and brings unedited copies up to the app's current defaults. Files outside the
-    .wiki folder are never written, and a file the person deleted is not made again.
-    -> {"created": [names], "updated": [names]}"""
+    """Run on each start. First tidies a .wiki made by the first layout (upgrade_layout). Then
+    copies each main slot's shipped default into the .wiki folder where its file has never been
+    made, and brings unedited copies (main, or an advanced copy never edited) up to the app's current
+    defaults. Advanced and internal slots are never copied here. Files outside the .wiki folder are
+    never written, and a file the person deleted is not made again.
+    -> {"created": [names], "updated": [names], "removed": [paths], "leftovers": [{path, kind, note}]}"""
     folder = folder if folder is not None else app_folder()
-    report = {"created": [], "updated": []}
+    report = {"created": [], "updated": [], "removed": [], "leftovers": []}
     if folder is None or not folder.is_dir():
         return report
     with _lock:
         record = load_record(folder)
-        resolver = Resolver(folder, record, use_env=False)
         changed = False
+        if record.get("layout", 1) < LAYOUT_VERSION:
+            report.update(upgrade_layout(folder, record))
+            changed = True
+        resolver = Resolver(folder, record, use_env=False)
         for name in slot_names():
             target = resolver.path(name)
             if target is None or not _inside(target, folder):
                 continue
+            if name in _ADVANCED and not resolver.has_copy(name):
+                continue   # built in: read from the app's own file, never copied here
             info = record["slots"].setdefault(name, {})
             key = "override_base" if resolver.is_overridden(name) else "base"
             shipped = shipped_text(name)
@@ -776,6 +962,335 @@ def sync_slots(folder: Path | None = None) -> dict:
         if changed:
             save_record(record, folder)
     return report
+
+
+def upgrade_layout(folder: Path, record: dict) -> dict:
+    """Tidies a .wiki folder made by the first layout, once (record["layout"] becomes 2). Changes
+    record in place; the caller saves it. Nothing the person edited is ever deleted:
+      - a now-internal or retired file (OLD_LAYOUT) identical to a default the app recorded for it,
+        or to today's shipped file, is removed; an edited one is left where it is, no longer read,
+        and listed once as a leftover;
+      - an agent prompt's copy in prompts/ (now advanced) is removed if unedited, kept as the
+        person's customised copy if edited;
+      - Daily and Weekly move to the note templates folder, the capture rules to capture-rules.md,
+        unless the person had pointed them elsewhere (their override stays).
+    -> {"removed": [paths], "leftovers": [{path, kind, note}]}"""
+    removed, leftovers = [], []
+    overrides, slots = record["overrides"], record["slots"]
+    record["layout"] = LAYOUT_VERSION   # first, so the paths below are the new layout's
+
+    def known(name, info):
+        hashes = {info.get("base"), info.get("override_base")} - {None}
+        for rel in (INTERNAL.get(name) or RETIRED_INTERNAL.get(name), _SLOTS[name][6] if name in _SLOTS else None,
+                    "agents/TASKS.md" if name == "prompt.tasks" else None):
+            if rel and (APP_FILES / rel).is_file():
+                hashes.add(_hash(_normalise((APP_FILES / rel).read_text(encoding="utf-8-sig"))))
+        return hashes
+
+    def unedited(file, name, info):
+        try:
+            return _hash(_normalise(file.read_text(encoding="utf-8-sig"))) in known(name, info)
+        except (OSError, UnicodeDecodeError):
+            return False
+
+    def leftover(file, what):
+        leftovers.append({"path": str(file), "kind": "edited_old_copy",
+                          "note": f"Your edited copy of {what}. WikiApp no longer reads it (this is now built into the "
+                                  "app); it is left here for you to keep or delete."})
+
+    for name, rel in OLD_LAYOUT.items():
+        info = slots.pop(name, None) or {}
+        pointed = overrides.pop(name, None)
+        if pointed and _norm_path(Path(_expand(pointed))) != _norm_path(folder / rel):
+            # pointed at a file of the person's own: never touched, just no longer read
+            leftovers.append({"path": pointed, "kind": "old_override", "note": f"A file you had set for {name}, "
+                              "which is now built into the app. WikiApp no longer reads it; the file is left as it was."})
+        file = folder / rel
+        if file.is_file():
+            if unedited(file, name, info):
+                file.unlink()
+                removed.append(str(file))
+            else:
+                leftover(file, name)
+    resolver = Resolver(folder, record, workspace=[], use_env=False)
+    for name in _ADVANCED:
+        copy = resolver.copy_path(name)
+        if resolver.is_overridden(name) or copy is None or not copy.is_file():
+            continue
+        info = slots.get(name) or {}
+        if unedited(copy, name, info):
+            copy.unlink()
+            removed.append(str(copy))
+            slots.pop(name, None)
+        else:
+            slots.setdefault(name, {}).setdefault("base", info.get("base") or _hash(shipped_text(name)))
+            slots[name]["seeded"] = True
+    old_templates = overrides.pop("templates", None)
+    overrides.pop("starters", None)
+    for name, rel in OLD_MOVES.items():
+        if resolver.is_overridden(name):
+            continue   # the person pointed it somewhere: that stays
+        old = (Path(_expand(old_templates)) / Path(rel).relative_to("templates")) if old_templates and rel.startswith("templates/") else folder / rel
+        new = resolver.path(name)
+        if not old.is_file() or new is None:
+            continue
+        if not _inside(old, folder):
+            overrides[name] = str(old)   # their templates folder was elsewhere: keep using that file
+            continue
+        if not new.exists():
+            new.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(old, new)
+        elif name in _SLOTS and unedited(old, name, slots.get(name) or {}):
+            old.unlink()
+            removed.append(str(old))
+        else:
+            leftover(old, name)
+    for rel in ("templates/Notes", "templates/Pages", "templates", "starters", "prompts"):
+        try:
+            (folder / rel).rmdir()   # only when empty
+        except OSError:
+            pass
+    if leftovers:
+        file = folder / LEFTOVERS_FILE
+        try:
+            listed = json.loads(file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            listed = []
+        listed = listed if isinstance(listed, list) else []
+        write_text_atomic(file, json.dumps(listed + leftovers, indent=1, ensure_ascii=False) + "\n")
+    return {"removed": removed, "leftovers": leftovers}
+
+
+# ---- Wiki roles ---------------------------------------------------------------------------------
+# Each open wiki has a role, kept in the private folder (wiki_settings: wiki-settings.json), never
+# in a file inside the wiki:
+#   personal  where notes and sessions are captured, and Review and Suggest merges write (one at most)
+#   team      the only wiki Promotion proposes changes to (one at most)
+#   view      no agent writes to it or proposes pages for it (Promotion may still read it)
+# Roles are keyed by the wiki's folder, so renaming its alias keeps its role. A wiki with no stored
+# role (newly opened) is "view", whatever its alias. Upgrading an existing installation (no roles
+# saved yet, opened by this version: the host's start-up, or choosing or adopting a private folder,
+# all calling wiki_roles(persist=True, upgrade=True)): the personal wiki was the one picked in the
+# Sessions tab (the sessionsWiki setting), else the one with the alias "personal", else the one wiki
+# whose WIKI.md says type: personal; it becomes personal, and if exactly one other wiki is open it
+# becomes the team wiki; with several others they all start as view and needs_team says a team
+# wiki needs choosing. That result is saved at once, so a wiki opened afterwards is view only. A
+# fresh private folder saves "no roles" the same way; nothing else ever works roles out.
+
+ROLES = ("personal", "team", "view")
+MIN_TURNS_OPTIONS = (0, 3, 5, 10, 20)
+DEFAULT_MIN_TURNS = 3
+_ROLE_WORDS = {"personal": "your personal wiki", "team": "your team wiki", "view": "view only"}
+
+
+def root_key(root: str | os.PathLike) -> str:
+    """A wiki folder as a key: absolute, resolved, case as the system compares it."""
+    return _norm_path(Path(_expand(str(root))))
+
+
+def load_wiki_settings(folder: Path | None = None) -> dict:
+    """wiki-settings.json: {"version": 1, "roles": {root key: {role, root, alias}}, "sessions": {"min_turns"}}.
+    "roles" is missing until the first result has been saved."""
+    file = Resolver(folder).path("wiki_settings") if (folder or app_folder()) else None
+    data = {}
+    if file is not None:
+        try:
+            data = json.loads(file.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_wiki_settings(data: dict) -> None:
+    file = Resolver(require_app_folder()).path("wiki_settings")
+    data["version"] = 1
+    ensure_parent(file)
+    write_text_atomic(file, json.dumps(data, indent=1, ensure_ascii=False) + "\n")
+
+
+def _marked_personal(root: str) -> bool:
+    """A WIKI.md whose frontmatter says type: personal (how a personal wiki was marked before roles)."""
+    try:
+        text = (Path(root) / "WIKI.md").read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return False
+    match = _FRONTMATTER.match(text)
+    return bool(match and re.search(r"(?m)^type:\s*['\"]?personal['\"]?\s*$", match.group(0)))
+
+
+def _first_roles(folder: Path | None, workspace: list[dict]) -> dict:
+    """The roles before any were chosen, worked out from the older settings (see above)."""
+    alias = read_settings(folder).get("sessionsWiki")
+    personal = next((w for w in workspace if isinstance(alias, str) and w["alias"] == alias), None) \
+        or next((w for w in workspace if w["alias"].lower() == "personal"), None)
+    if personal is None:
+        marked = [w for w in workspace if _marked_personal(w["root"])]
+        personal = marked[0] if len(marked) == 1 else None
+    others = [w for w in workspace if w is not personal]
+    roles = {}
+    if personal is not None:
+        roles[root_key(personal["root"])] = {"role": "personal", "root": personal["root"], "alias": personal["alias"]}
+    for w in others:
+        roles[root_key(w["root"])] = {"role": "team" if len(others) == 1 else "view", "root": w["root"], "alias": w["alias"]}
+    return roles
+
+
+def _stored_roles(folder: Path | None, workspace: list[dict], persist: bool = False, upgrade: bool = False) -> dict:
+    """{root key: {role, root, alias}}: the saved roles. With none saved yet: when upgrade (an
+    existing installation being opened by this version: the host's start-up, choosing or adopting a
+    private folder) the roles worked out from the older settings (_first_roles); otherwise none, so
+    every wiki is view only. Saved when persist and there is a private folder."""
+    data = load_wiki_settings(folder)
+    roles = data.get("roles")
+    if isinstance(roles, dict):
+        return {k: v for k, v in roles.items() if isinstance(v, dict) and v.get("role") in ROLES}
+    folder = folder if folder is not None else app_folder()
+    if folder is not None and load_record(folder).get("roles_settled"):
+        return {}   # settled with none (a fresh folder): every wiki is view only until one is chosen
+    roles = _first_roles(folder, workspace) if upgrade else {}
+    if persist and folder is not None and folder.is_dir():
+        if not roles:
+            # Nothing to keep: a note in paths.json says so, rather than a file of no roles, so a
+            # fresh private folder still holds only what the person edits.
+            with _lock:
+                record = load_record(folder)
+                record["roles_settled"] = True
+                save_record(record, folder)
+            return {}
+        with _lock:
+            fresh = load_wiki_settings(folder)
+            if not isinstance(fresh.get("roles"), dict):
+                fresh["roles"] = roles
+                _save_wiki_settings(fresh)
+            roles = fresh["roles"]
+    return roles
+
+
+def _roles_by_alias(folder: Path | None, workspace: list[dict], persist: bool = False, upgrade: bool = False) -> dict:
+    stored = _stored_roles(folder, workspace, persist, upgrade)
+    return {w["alias"]: (stored.get(root_key(w["root"])) or {}).get("role", "view") for w in workspace}
+
+
+def _summary(roles: dict) -> dict:
+    connected = list(roles.values())
+    return {"roles": roles,
+            "needs_personal": bool(connected) and "personal" not in connected,
+            "needs_team": any(r != "personal" for r in connected) and "team" not in connected}
+
+
+def wiki_roles(workspace: list | None = None, persist: bool = False, upgrade: bool = False) -> dict:
+    """{"roles": {alias: "personal" | "team" | "view"}, "needs_team": bool, "needs_personal": bool}
+    for the open wikis. A wiki not seen before is "view", whatever its alias. needs_personal: no
+    open wiki is personal; needs_team: some open wiki isn't personal, and none is the team wiki.
+    upgrade: this is an existing installation opened by this version (see _stored_roles); only
+    then are roles worked out from the older settings, and only when none are saved yet."""
+    folder = app_folder()
+    workspace = read_workspace(folder) if workspace is None else workspace
+    return _summary(_roles_by_alias(folder, workspace, persist, upgrade))
+
+
+def set_wiki_role(alias: str, role: str) -> dict:
+    """Gives an open wiki a role. Making a wiki personal or team makes the wiki that had that role
+    view only. -> wiki_roles() plus "demoted": the alias of the wiki that lost the role, or None."""
+    if role not in ROLES:
+        raise ValueError(f"Unknown role: {role}. Choose personal, team or view.")
+    folder = require_app_folder()
+    workspace = read_workspace(folder)
+    wiki = next((w for w in workspace if w["alias"] == alias), None)
+    if wiki is None:
+        raise ValueError(f"{alias} isn't one of the open wikis.")
+    roles = _stored_roles(folder, workspace)   # the first result if none is saved yet
+    with _lock:
+        key = root_key(wiki["root"])
+        demoted = None
+        aliases = {root_key(w["root"]): w["alias"] for w in workspace}
+        if role in ("personal", "team"):
+            for other, entry in roles.items():
+                if other != key and entry.get("role") == role:
+                    entry["role"] = "view"
+                    demoted = demoted or aliases.get(other) or entry.get("alias")
+        roles[key] = {"role": role, "root": wiki["root"], "alias": alias}
+        data = load_wiki_settings(folder)
+        data["roles"] = roles
+        _save_wiki_settings(data)
+    return {**wiki_roles(workspace), "demoted": demoted}
+
+
+def wiki_role_for_root(root: str | os.PathLike) -> str | None:
+    """The role of the open wiki at root, or None when root isn't one of the open wikis (or there is
+    no private folder: the sessions command line on its own)."""
+    folder = app_folder()
+    if folder is None:
+        return None
+    workspace = read_workspace(folder)
+    key = root_key(root)
+    wiki = next((w for w in workspace if root_key(w["root"]) == key), None)
+    if wiki is None:
+        return None
+    return _roles_by_alias(folder, workspace).get(wiki["alias"], "view")
+
+
+def wiki_with_role(role: str) -> dict | None:
+    """The open wiki that has this role ("personal" or "team"): {"alias", "root"}, or None."""
+    folder = app_folder()
+    if folder is None:
+        return None
+    workspace = read_workspace(folder)
+    roles = _roles_by_alias(folder, workspace)
+    return next((w for w in workspace if roles.get(w["alias"]) == role), None)
+
+
+def alias_of_root(root: str | os.PathLike) -> str:
+    """The open wiki's alias for root, or the folder's name."""
+    key = root_key(root)
+    for w in read_workspace(app_folder()):
+        if root_key(w["root"]) == key:
+            return w["alias"]
+    return Path(root).name or str(root)
+
+
+def role_refusal(alias: str, role: str | None, wanted: str) -> str:
+    """The plain-words reason a write to a wiki is refused. wanted: the role the write needs."""
+    if wanted == "team":
+        if role == "personal":
+            return f"{alias} is your personal wiki; Promotion only proposes changes to the team wiki. Choose a team wiki in Settings."
+        return f"{alias} is {_ROLE_WORDS.get(role or 'view', 'view only')}; choose a team wiki in Settings."
+    if role == "team":
+        return (f"{alias} is your team wiki; notes and sessions are only captured into your personal wiki. "
+                "Choose your personal wiki in Settings.")
+    if role == "view":
+        return f"{alias} is view only; choose your personal wiki in Settings."
+    return f"{alias} isn't your personal wiki; choose your personal wiki in Settings."
+
+
+# ---- The Sessions tab's filter ---------------------------------------------------------------------
+# "Hide sessions with fewer than N turns": only the person's own messages count. Kept in
+# wiki-settings.json beside the roles.
+
+def stored_min_turns() -> int | None:
+    """The filter as the person set it, or None when it was never set (or there is no private folder)."""
+    if app_folder() is None:
+        return None
+    value = (load_wiki_settings().get("sessions") or {}).get("min_turns")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value in MIN_TURNS_OPTIONS else None
+
+
+def get_sessions_filter() -> dict:
+    """{"min_turns": N, "options": [0, 3, 5, 10, 20]} (0: off)."""
+    found = stored_min_turns()
+    return {"min_turns": DEFAULT_MIN_TURNS if found is None else found, "options": list(MIN_TURNS_OPTIONS)}
+
+
+def set_sessions_filter(min_turns) -> dict:
+    if isinstance(min_turns, bool) or not isinstance(min_turns, int) or min_turns not in MIN_TURNS_OPTIONS:
+        raise ValueError("Choose 0 (off), 3, 5, 10 or 20.")
+    require_app_folder()
+    with _lock:
+        data = load_wiki_settings()
+        sessions = data.get("sessions") if isinstance(data.get("sessions"), dict) else {}
+        data["sessions"] = {**sessions, "min_turns": min_turns}
+        _save_wiki_settings(data)
+    return get_sessions_filter()
 
 
 # ---- Engine settings ----------------------------------------------------------------------------

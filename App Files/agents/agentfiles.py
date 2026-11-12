@@ -1,10 +1,11 @@
 """The three agents behind the Ingest view, and where each one's prompt lives.
 
-Each agent has exactly one prompt file: a prompt slot in the app's path list (host/pathlist.py),
-"prompt.<agent id>". By default it is <the private .wiki folder>/prompts/<agent id>.md, copied
-there from this folder's shipped default (agents/<agent id>/SKILL.md) when the folder is set up;
-the person may point it at any other file instead, such as a Claude Code skill they already have.
-An unedited copy follows the app's newer defaults by itself; an edited one is left alone.
+Each agent has exactly one prompt file: an advanced slot in the app's path list (host/pathlist.py),
+"prompt.<agent id>". By default the agent reads this folder's shipped file (agents/<agent id>/SKILL.md)
+directly ("built_in"); nothing is copied. The person can ask for an editable copy (customise:
+<the private .wiki folder>/prompts/<agent id>.md), or point the slot at any other file, such as a
+Claude Code skill they already have; saving a built-in prompt makes the copy first, so the app's
+own file is never written. Reset deletes the copy and goes back to the shipped file.
 
 What an agent is sent = the body of its prompt file (everything after any frontmatter), then
 whatever the code adds for that one request (the material to work on, each wiki's rules, the reply
@@ -114,7 +115,8 @@ def save(agent_id, text, base=None):
 
 def info(base=None):
     """For the Agents window: every agent with its job, its file, its prompt and the slot's state
-    (status "default" | "customised" | "customised_newer_default", or None when the file is missing)."""
+    (status "built_in" (the app's own file) | "customised" | "customised_newer_default", or None when
+    a file it was pointed at is missing). Saving a built-in prompt makes the editable copy first."""
     entries = {} if base else {e["name"]: e for e in pathlist.list_paths() if e["name"].startswith("prompt.")}
     out = []
     for agent in AGENTS:
@@ -130,5 +132,6 @@ def info(base=None):
         entry = entries.get(slot(agent["id"]), {})
         out.append({**agent, "slot": slot(agent["id"]), "path": str(path) if path else "", "text": text,
                     "default": default, "changed": text != default, "exists": bool(path) and path.is_file(),
-                    "status": entry.get("status"), "can_reset": entry.get("can_reset", False), "error": missing})
+                    "status": entry.get("status"), "can_reset": entry.get("can_reset", False),
+                    "can_customise": entry.get("can_customise", False), "error": missing})
     return out

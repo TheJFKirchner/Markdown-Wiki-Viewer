@@ -180,7 +180,7 @@ Notes are for jotting things down before they belong anywhere in the wiki: a dai
 - `Templates/Notes/`: templates for quick notes (this section);
 - `Templates/Pages/`: templates for the pages Ingest creates (see Ingest).
 
-A wiki that has its own `Templates` folder uses it (note templates kept directly in `Templates/`, the older layout, still work). A wiki without one uses the templates in your private folder, `.wiki/templates/` (`Notes/Daily.md`, `Notes/Weekly.md`, `Notes/Sample note.md`, `Pages/Sample page.md`). The app never adds a `Templates` folder to a wiki. The shipped originals are in `App Files/app/templates/`; **Settings** shows where each template is, and **Reset to default** puts an edited one back.
+The Daily and Weekly templates are yours to edit, in your private folder: `.wiki/note-templates/Daily.md` and `Weekly.md`. A wiki that has its own `Templates` folder adds its own note templates (note templates kept directly in `Templates/`, the older layout, still work). The app never adds a `Templates` folder to a wiki. The shipped originals are in `App Files/app/templates/`; **Settings** shows where each template is, and **Reset to default** puts an edited one back.
 
 Each template is one Markdown file, named after it. Daily and Weekly are always offered; click the pencil next to one in the + menu to edit it. **New template…** makes another (for example "Meeting"). In templates, `{{date}}`, `{{time}}`, `{{day}}` (Saturday, October 31), `{{week}}`, `{{year}}` and `{{signature}}` are filled in. Templates themselves don't appear in the graph, tags or tasks.
 
@@ -199,7 +199,9 @@ The Ingest view gets what you write and do into your wikis. It has four tabs, an
 | **Review** | Wiki reviewer | Rewrites a topic page's summary and its Related section once new records have landed on it, shows conflicts between your notes and sessions, and suggests merging duplicate topics and tags. The tab also suggests folders. | Each folder and merge suggestion, and each conflict. Summaries are written straight away |
 | **Promotion** | Team wiki manager | Reads personal pages and queued findings about data, and proposes changes to the team wiki. | Every change |
 
-**Promotion is the only way anything reaches a team wiki.** Notes and sessions only ever go to your personal wiki (a folder whose `WIKI.md` says `type: personal`), and Promotion proposes each change to the team wiki as a card you accept or reject.
+**Each open wiki has a role**, set in **Settings**: **personal** (one at most: where notes and sessions are captured, and where Review writes), **team** (one at most: the only wiki Promotion proposes changes to) or **view only** (any number: no agent ever writes to it or proposes pages for it, though Promotion may read it for context). A wiki you open starts as view only, whatever you call it. Making a second wiki personal, or team, turns the one that had that role view only. Roles are kept in your private folder, never in the wiki, and survive renaming a wiki's alias. The first time this version runs on an existing setup, the wiki you used as personal stays personal; if exactly one other wiki is open it becomes your team wiki, and if there are several they start as view only and Settings asks you to choose the team wiki. Your own edits in the editor are never limited by a role.
+
+**Promotion is the only way anything reaches a team wiki.** Notes and sessions only ever go to your personal wiki, and Promotion proposes each change to the team wiki as a card you accept or reject. A capture aimed at any other wiki, or a promotion into anything but the team wiki, is refused and says why ("Northwind is view only; choose a team wiki in Settings").
 
 Each tab shows how many things are waiting in it. Two buttons at the right of the tab bar belong to all four tabs:
 - **?** explains how an agent works, with a diagram, in plain words.
@@ -216,7 +218,7 @@ The Notes tab captures your wrapped quick notes into your personal wiki, exactly
 3. A captured note gets two lines in its frontmatter: `capture_id` (its permanent id, so a renamed or moved note is never captured twice) and `ingested: <date>`. Nothing else in the note changes.
 4. Edit a note later and it shows as changed: capturing it again replaces its earlier record; it never adds a second one.
 
-**Your capture rules.** Your private folder has `prompts/personal-capture-rules.md`, your own free-text rules for what capture should pick out and what gets its own page in your personal wiki ("give every client its own page", "always capture anything about X"). It starts as a short explanation inside comment marks, which are never sent; whatever you write below it goes with every capture and review for the personal wiki. It's yours: the app never changes or resets it. Open it from **Settings**.
+**Your capture rules: the main way to shape your personal wiki.** Your private folder has `capture-rules.md` at its top, your own free-text rules for what capture should pick out and what gets its own page in your personal wiki ("give every client its own page", "always capture anything about X"). It's the one place for personal-wiki rules: capture and review read it and no other rules file. It starts as a short explanation inside comment marks, which are never sent; whatever you write below it goes with every capture, review and merge suggestion for the personal wiki. It's yours: the app never changes or resets it. It's the first row in **Settings**. (A team wiki's own rules file plays the same part for Promotion.)
 
 **Where each line came from.** Every topic log line is marked `[note]` or `[session]`, and ends `— also touches [[other-topic]]` when the same record was filed under other topics too.
 
@@ -227,6 +229,10 @@ The details are in [sessions/INTEGRATION.md](<App Files/sessions/INTEGRATION.md>
 ### The Sessions tab
 
 The **Sessions** tab lists your Claude Code sessions from the last two weeks that aren't in your personal wiki yet. Ingesting one sends it to the executive assistant, which writes a short session note (what was done, what was decided and why, what's still open) and files it under one to three topics.
+
+- **Each session has a readable name**, such as `2026-11-12-churn-dashboard-fix`: the date and a few words from the title Claude Code gave the session (or the one you gave it), else from your first message. A short piece of the session's id is added only when two names would clash. The name never changes once given.
+- **Subagents are part of their session.** When Claude handed work to a helper (a subagent), the helper's report and Claude's instructions to it are in what the executive assistant sees, marked as Claude's side, never as yours. The row says how many subagents a session used; a subagent is never listed as a session of its own. As with everything Claude says, a subagent's finding is captured only if you confirmed it in the conversation.
+- **Hide short sessions.** "Hide sessions with fewer than N turns" (off, 3, 5, 10 or 20; 3 to start with) counts only your own messages. The list always uses exactly the value shown (a `config.json` for the command-line tool doesn't change it). Hidden sessions are left out of the list, and so out of **Ingest all**; the tab says how many are hidden.
 
 - **A topic is one piece of work**: a project, an analysis, a question or a tool. Every topic has a page at the top level of the personal wiki, named after it (`<topic>.md`). The page has four parts:
   - **Current state**: a summary of where the work stands. The wiki reviewer writes it, in the Review tab.
@@ -239,14 +245,15 @@ The **Sessions** tab lists your Claude Code sessions from the last two weeks tha
 - **Session notes** go in one `Sessions` folder. A note's frontmatter lists its `topics:`, and carries its topics' tags as `tags:`, so they show on the Graph card, in search and as pills like any other tag.
 - **Tasks.** The executive assistant records at most five tasks you still have to do after the session. They are written in the note as ordinary tasks, linked to the note's first topic, so they show in the Tasks view. It is also shown the open tasks anywhere in your personal wiki, and a session that finishes or moves one of them on updates it where it is written.
 
-1. Choose your **Personal wiki** folder. The first time, press **Set up**: it adds a `WIKI.md` that marks the folder as personal, an `index.md`, a `promotion-queue.md` and a `Sessions` folder. Topic pages are added at the top of the folder as sessions are ingested. Nothing already there is changed.
+1. Give one wiki the **personal** role in **Settings**. The first time, press **Set up**: it adds a `Sessions` folder, a `promotion-queue.md` and an `index.md`, and says exactly which of them it made. It doesn't add a `WIKI.md` (an existing one is left alone). Topic pages are added at the top of the folder as sessions are ingested. Nothing already there is changed.
 2. Press **Ingest** on a session, or **Ingest all** to go through every session listed, one after another. **Stop after this one** ends the run early. **Skip** removes a session from the list without writing anything.
 3. The right side shows what each session added: links to the note and its topics, the tags, and any data findings queued. A new topic is marked NEW, and a topic that is now due for a review says so.
 
-- **There's no approval step.** What's captured is written straight away. That's safe because sessions are only ever written to a folder marked as a personal wiki; a team wiki can't be chosen by mistake.
+- **There's no approval step.** What's captured is written straight away. That's safe because sessions are only ever written to the wiki whose role is personal; a team or view-only wiki can't be chosen by mistake.
 - **A session you continue later** comes back to the list marked CONTINUED. Ingesting it again replaces its note; it never makes a second one.
-- **Sessions a script started** through the Agent SDK (this app's own agent runs among them) are never listed. There is no option to include them. Subagents' own transcripts aren't read either.
-- **What Claude is sent** is a cut-down transcript: what you and Claude said, and each tool call as one line. Tool output, such as query results, is removed first. Commands are masked too: a number of six or more digits becomes `#`, quoted values inside anything that looks like a SQL query become `'?'`, and a command is cut at 160 characters. The paths of files that were read or edited are kept as they are.
+- **Sessions a script started** through the Agent SDK (this app's own agent runs among them) are never listed. There is no option to include them.
+- **Session note files** are named `<date>-<title words>.md`; a piece of the session's id is added only if another note already has that name. Notes captured by an earlier version keep their names.
+- **What Claude is sent** is a cut-down transcript: what you and Claude said, each subagent's report (labelled as Claude's helper), and each tool call as one line. Tool output, such as query results, is removed first. Commands are masked too: a number of six or more digits becomes `#`, quoted values inside anything that looks like a SQL query become `'?'`, and a command is cut at 160 characters. The paths of files that were read or edited are kept as they are.
 - **Findings about data** (which table to use for what, a known bad period) are added to `promotion-queue.md`. They reach the team wiki only through the Promotion tab, where you accept each change.
 - **Capture never rewrites a topic's summary.** It adds the session's line to the topic's log, and the topic waits for the Review tab once it's due.
 - **A personal wiki from the first version** (a `tags` folder of tag pages, and `session-notes` by year) is upgraded by itself the first time it's used: the tag pages become topics at the top level, the notes move to `Sessions`.
@@ -257,7 +264,7 @@ The capture tool also runs on its own from the command line, and comes with the 
 
 ### The Review tab
 
-The **Review** tab keeps the topic pages of your personal wiki (the one chosen in the Sessions tab) accurate and organised. The wiki reviewer does two jobs there: it rewrites a topic's summary, and it suggests merges.
+The **Review** tab keeps the topic pages of your personal wiki (the wiki with the personal role) accurate and organised. The wiki reviewer does two jobs there: it rewrites a topic's summary, and it suggests merges.
 
 **Reviews, on the left.** A topic becomes due for a review once three new sessions are filed under it, or when it is flagged. The row says why: a decision was reversed, a session was taken off it, or topics were merged into it.
 - The list shows the topics that are due. Tick **Show all topics** to see the rest; any topic can be reviewed at any time.
@@ -287,13 +294,13 @@ The right side also lists what was reviewed, grouped or merged since the app sta
 
 The **Promotion** tab moves what's durable in your personal wiki into the team wiki, and it's the only way anything gets there. The team wiki manager proposes each change as a card, and nothing is written until you accept it.
 
-1. The left side lists, from your personal wiki (the one chosen in the Sessions tab):
+1. The left side lists, from your personal wiki (the wiki with the personal role):
    - the topic pages and folder pages that haven't been promoted yet, and those that changed since they were last promoted (a new session, a review, a merge, or a move into a folder);
    - the **Promotion queue** (`promotion-queue.md`), while it has findings that aren't ticked.
 
    A topic can only be ticked once it has been reviewed since it last changed. Until then its checkbox is disabled and the row says to review it first, in the Review tab. Tick **Show already promoted** to list promoted pages again, to send one a second time.
 2. Tick what to send, pick the **Model** if you want another one (Sonnet 5.5 is the default here), and press **Promote**. A progress box shows what Claude is reading.
-3. The team wiki manager proposes changes as cards, one per page, in every open folder except your personal wiki. A proposal for the personal wiki is refused before it becomes a card, so the tab needs your team wiki's folder in the workspace. A card shows the change as red and green lines, any new tags and links, and, for a new page, a preview and the folder it will be saved in.
+3. The team wiki manager proposes changes as cards, one per page, in your team wiki only (the wiki with the team role in Settings). It may read view-only wikis for context, but a proposal for any wiki other than the team wiki is refused before it becomes a card, so the tab needs a team wiki. A card shows the change as red and green lines, any new tags and links, and, for a new page, a preview and the folder it will be saved in.
 4. Answer every card, then press **Submit** (or Ctrl+Enter in a feedback box). Nothing is written to the team wiki until then:
    - **✓** writes the change;
    - **✗** drops it;
@@ -312,23 +319,24 @@ If a page changes after Claude proposed a change to it, its card turns grey with
 
 - **Agents** lists the three agents: name, tab and what each does. **See the prompt** opens an agent's prompt for editing, with **Save** and **Reset to default** (which puts the shipped prompt back in the box; nothing changes until you save).
 - **Page templates** lists every wiki's page templates and makes new ones (below).
-- **One rules tab per wiki** edits that wiki's rules file (by default `wiki_rules.md` at the folder's top level; **Settings** can point it elsewhere), which says where things go and how to write them. Every agent that works in a wiki is sent that wiki's rules: the team wiki manager for each open wiki, the executive assistant and the wiki reviewer for the personal wiki. A wiki without the file starts from a short starter, and saving creates it.
+- **One rules tab per wiki** edits that wiki's rules file (by default `wiki_rules.md` at the folder's top level; **Settings** can point it elsewhere), which says where things go and how to write them. The team wiki manager is sent the team wiki's rules file with every Promotion run, and no other wiki's (a view-only wiki's pages can still be read for context). Your personal wiki's rules are your capture rules file instead (see [The Notes tab](#the-notes-tab-capture)). A wiki without the file starts from a short starter, and saving creates it.
 
-**Each agent has exactly one prompt file**, in your private folder: `.wiki/prompts/<agent>.md`, where the agent is `executive-assistant`, `wiki-reviewer` or `team-wiki-manager`.
-- The first time, each is copied from the default that ships with the app (`App Files/agents/<agent>/SKILL.md`). The other wording the agents get (first messages, feedback and answers messages, the capture and review requests) is in prompt files there too, shipped in `App Files/agents/messages/`.
-- **Settings** shows each one's state: **Default** (an unedited copy, which follows a newer default when the app is updated), **Customised** (you've edited it, so updates leave it alone), or **Customised, newer default available**. **Reset to default** puts the shipped text back.
+**Rules first, prompts rarely.** Your capture rules and each team wiki's rules file are the main way to change what the agents do. The agents' own prompts are an advanced setting:
+- By default each agent reads the prompt that ships with the app (`App Files/agents/<agent>/SKILL.md`, where the agent is `executive-assistant`, `wiki-reviewer` or `team-wiki-manager`); nothing is copied. **Settings** shows it as **Built in**.
+- **Customise** (in Settings or Agents and rules, or just saving an edit) makes your own copy in `.wiki/prompts/<agent>.md`, which the agent then reads. It shows as **Customised**, or **Customised, newer default available** when the app later ships a different prompt. **Reset to default** deletes your copy and goes back to the built-in prompt (the `prompts` folder goes too once it's empty).
 - A prompt can instead point at any existing file, such as a Claude Code skill you already have (**Change** in Settings). If that file starts with frontmatter (the lines between two `---`), keep them when you edit it.
+- The rest of what the agents are told (the wording around each request, the samples and starters) is built into the app (`App Files/agents/messages/`) and isn't copied or listed.
 - The app sends an agent its file's text (without any frontmatter), then the material to work on, the wiki rules and the reply format itself. Those added parts aren't in the file, so editing a prompt can't break a run.
 - The app never writes to Claude Code's own folders (`~/.claude`). Earlier versions copied the prompts into `~/.claude/skills`; those copies are listed once as leftovers you can delete.
 
 A checkbox in the window also saves each Promotion run's raw requests in its run folder, to check exactly what was sent.
 
-**Page templates** shape the new pages the team wiki manager proposes. Each one is a Markdown file in a wiki's `Templates/Pages` folder (or, for a wiki without a `Templates` folder, in your private folder's `templates/Pages`):
+**Page templates** shape the new pages the team wiki manager proposes. Each one is a Markdown file in a wiki's `Templates/Pages` folder:
 - its file name is the template's name (`Planet.md`, `Gear.md`);
 - its frontmatter `description` says when to use it ("A piece of equipment I own. Use for a new page in Gear/.");
 - the rest is the page's layout: frontmatter fields and headings, with placeholders like `{{title}}`.
 
-Claude gets only each template's name and description with every run. It opens a template only when it's about to propose a new page that fits, then follows its layout, and the card shows which template it used. The **Page templates** tab lists every template (name, when to use it, a link to the file) and makes new ones. Like the quick-note templates, they're left out of the graph, tags and tasks, and they don't appear in the New note menu. Your private folder starts with `templates/Pages/Sample page.md`, a general page template to copy or edit.
+Claude gets only each template's name and description with every run. It opens a template only when it's about to propose a new page that fits, then follows its layout, and the card shows which template it used. The **Page templates** tab lists every template (name, when to use it, a link to the file) and makes new ones. Like the quick-note templates, they're left out of the graph, tags and tasks, and they don't appear in the New note menu. A new page template starts from a general sample built into the app.
 
 ### Setup, once
 
@@ -342,7 +350,9 @@ Everything the app keeps for you alone is in one folder named `.wiki`. Your wiki
 - **Where it is.** The first start asks. The suggested place is the app's own folder (the one with `WikiApp.cmd`), where `.gitignore` keeps it out of git, so a `git pull` never touches it. You can choose anywhere else; the app warns if the place is inside one of your wikis. You may pick the `.wiki` folder itself or the folder to put it in.
 - **Nothing is written before you choose.** Until then the app creates no file or folder at all.
 - **The pointer.** The only thing kept in a fixed place is one line saying where the folder is: `.wikiapp-location` in your user folder.
-- **What's in it:** `settings.json` (your folders, signature, colors, the last view), `window.txt`, `engine.json` (the AI engine and each agent's model), `paths.json` (where you pointed things in Settings), `prompts/` (the agents' prompts and your capture rules), `templates/` and `starters/`, `indexes/` (one index of each wiki, rebuilt on each run), `progress/` (what capture has done, per wiki), `ingest/` (Promotion cards waiting for an answer) and `ingest-runs/` (each run's prompts, log and transcript).
+- **What the first start creates** is short: the folder, `capture-rules.md` (your capture rules), `note-templates/Daily.md` and `Weekly.md`, and `paths.json` and `leftovers.json` (the app's own notes). `settings.json` follows as soon as the app saves your settings.
+- **What appears later, when it's needed:** `window.txt`, `engine.json` (the AI engine and each agent's model), `prompts/` (only an agent prompt you chose to customise), `indexes/` (one index of each wiki, rebuilt on each run), `progress/` (what capture has done, per wiki), `ingest/` (Promotion cards waiting for an answer) and `ingest-runs/` (each run's prompts, log and transcript).
+- **A `.wiki` folder from the previous version** (which copied about twenty files in) is tidied on the next start: copies you never edited are removed, your capture rules move to `capture-rules.md` and Daily and Weekly to `note-templates/`, an edited agent prompt is kept as your customised copy, and an edited copy of anything now built in is left where it is, no longer read, and listed once among the leftovers. Nothing you edited is deleted.
 - **From an earlier version.** The first time, the app copies what an earlier version kept in `~/.wikiapp` (settings, waiting cards, past runs) and the agents' prompts from `~/.claude/skills` (your edits count as customised). It only copies: nothing is deleted. Then it lists, once, what's left over (the old folder, the old skill copies, each wiki's old `.wiki/index.md`) for you to delete if you like.
 - **Moving it later.** In Settings, change the app folder's place: either **move** its contents to a new, empty place, or **adopt** a `.wiki` folder that's already there. The two are never merged.
 - **Updating from a zip:** extract over the top, or keep the folder elsewhere (see [Sharing it](#sharing-it)).
@@ -352,7 +362,9 @@ Everything the app keeps for you alone is in one folder named `.wiki`. Your wiki
 The gear at the bottom of the rail opens **Settings**: every file and folder the app uses, in one list, grouped (the app folder, app data, prompts, templates, each wiki, and things outside the app such as Claude Code's transcripts and the agentlib library), plus the AI engine.
 
 - Each row shows its path and its state: there, **missing** (a place you set that has gone; the app reports it and never makes it again), **not created yet** (the app makes it the first time it's needed), or **not set** (an optional entry, such as the reference tag list).
-- **Open** opens the file (in the app's editor when it's in one of your wikis) or folder. **Change** points the entry somewhere else; **Back to default location** (or **Clear**, for an optional entry) undoes that. Prompts and templates also have **Reset to default**.
+- The rules come first (your capture rules, then the team wiki's rules file: no other wiki's rules file is used, so none is listed), then the note templates, then everything else; the agents' prompts are last, as an advanced section.
+- **Open** opens the file (in the app's editor when it's in one of your wikis) or folder. **Change** points the entry somewhere else; **Back to default location** (or **Clear**, for an optional entry) undoes that. Note templates have **Reset to default**; an agent's prompt has **Customise** (make your own copy) and **Reset to default** (delete it).
+- **Wiki roles:** each open wiki is personal, team or view only (see [Ingest](#ingest)). Only the team wiki has a rules row (it's the only wiki whose rules file an agent is sent), and a view-only wiki has no progress row, since nothing is captured there.
 - **AI engine:** the engine (Claude, today), each agent's model, how you're signed in, and **Test connection**.
 
 ## Tasks
@@ -579,7 +591,8 @@ app/                 The app itself: plain HTML/CSS/JS, no build step.
   js/bridge.js       Messages between the page and the host.
   js/persist.js      Keeps settings in a file as well as in the browser storage (see below).
   lib/               Third-party libraries (see below).
-  templates/         The shipped templates (Notes/, Pages/) and starters (starters/) copied into .wiki.
+  templates/         The shipped templates: Daily and Weekly (copied into .wiki/note-templates), and the
+                     built-in samples and starters (never copied).
 host/                The host (Python, Windows and Mac): wikiapp.py, notefiles.py, ingestruns.py,
                      sessionruns.py; pathlist.py (every path the app uses, in one list) and appfolder.py
                      (the private folder: first run, moving it, older data, agentlib); tests/; the icon.
@@ -595,7 +608,7 @@ sessions/            Capture (sessions and notes), reviews, conflicts, tags, fol
 
 Paths in the rest of this section are inside `App Files`.
 
-The host (`host/wikiapp.py`) opens a window and shows `app/index.html` in it. The page can't read your disk directly. It asks the host through a few small messages: `pickFolder`, `scanVault`, `unwatchFolder`, `editLines`, `appendLines` and `createNote` (edits and new notes, `.md` files only), `readText` (showing a script, read-only), `saveSettings`, `openExternal` for web links, `closeWindow` (the page's answer when you close the window: it saves what you typed first, and asks before losing anything), the private folder and Settings messages (`firstRunState`, `chooseFolder`, `relocateFolder`, `dismissLeftovers`, `listPaths`, `setPath`, `resetPrompt`, `readPathFile`, `writePathFile`, `openPath`, `pickFile`, `getEngineSettings`, `setEngineSettings`, `setAgentModel`, `connectionStatus`, `testConnection`, `agentlibStatus`, `installAgentlib`), and the Ingest messages: for the Promotion tab (`ingestInfo`, `startIngest`, `cancelIngest`, `reviseIngestCards`, `answerIngestQuestions`, `saveIngestState`, `runIngestSetup`, `listIngestRuns`, `openIngestRun`, `listIngestModels`), for the agents' prompts (`agentsInfo`, `saveAgentPrompt`), for the Notes tab (`captureNotes`, `notesStatus`), for the Sessions tab (`sessionsStatus`, `sessionsSetup`, `sessionsList`, `sessionsIngest`, `sessionsSkip`) and for the Review tab (`reviewList`, `reviewTopic`, `suggestFolders`, `applyFolder`, `suggestMerges`, `applyMerge`, `listConflicts`, `resolveConflict`). The host watches every open folder and tells the page which one changed. All of this lives in [host/wikiapp.py](<App Files/host/wikiapp.py>) and [app/js/bridge.js](<App Files/app/js/bridge.js>); TECHNICAL.md lists every message's payload.
+The host (`host/wikiapp.py`) opens a window and shows `app/index.html` in it. The page can't read your disk directly. It asks the host through a few small messages: `pickFolder`, `scanVault`, `unwatchFolder`, `editLines`, `appendLines` and `createNote` (edits and new notes, `.md` files only), `readText` (showing a script, read-only), `saveSettings`, `openExternal` for web links, `closeWindow` (the page's answer when you close the window: it saves what you typed first, and asks before losing anything), the private folder and Settings messages (`firstRunState`, `chooseFolder`, `relocateFolder`, `dismissLeftovers`, `listPaths`, `setPath`, `resetPrompt`, `readPathFile`, `writePathFile`, `openPath`, `pickFile`, `getEngineSettings`, `setEngineSettings`, `setAgentModel`, `getWikiRoles`, `setWikiRole`, `getSessionsFilter`, `setSessionsFilter`, `connectionStatus`, `testConnection`, `agentlibStatus`, `installAgentlib`), and the Ingest messages: for the Promotion tab (`ingestInfo`, `startIngest`, `cancelIngest`, `reviseIngestCards`, `answerIngestQuestions`, `saveIngestState`, `runIngestSetup`, `listIngestRuns`, `openIngestRun`, `listIngestModels`), for the agents' prompts (`agentsInfo`, `saveAgentPrompt`), for the Notes tab (`captureNotes`, `notesStatus`), for the Sessions tab (`sessionsStatus`, `sessionsSetup`, `sessionsList`, `sessionsIngest`, `sessionsSkip`) and for the Review tab (`reviewList`, `reviewTopic`, `suggestFolders`, `applyFolder`, `suggestMerges`, `applyMerge`, `listConflicts`, `resolveConflict`). The host watches every open folder and tells the page which one changed. All of this lives in [host/wikiapp.py](<App Files/host/wikiapp.py>) and [app/js/bridge.js](<App Files/app/js/bridge.js>); TECHNICAL.md lists every message's payload.
 
 **Where your settings are kept:** in your private `.wiki` folder (see [Your private folder](#your-private-folder-wiki)). What the Notes, Sessions and Review tabs write goes into your personal wiki itself; what the Promotion tab writes (once you accept it) goes into the team wiki.
 

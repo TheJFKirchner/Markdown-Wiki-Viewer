@@ -11,7 +11,7 @@
   "lookback_days": 14,
   "review_after_entries": 3,
   "folder_after_topics": 3,
-  "min_user_messages": 2,
+  "min_turns": 3,
   "max_transcript_chars": 160000,
   "llm_timeout_seconds": 300,
   "exclude_project_patterns": ["AppData-Local-Temp"]

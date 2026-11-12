@@ -1,17 +1,15 @@
 // The Ingest view's windows:
-//   Agents and rules: an Agents tab listing the four agents (note taker, executive assistant,
-//     wiki reviewer, team wiki manager) with a way to see and edit each one's prompt file (a
-//     Claude Code skill), the page templates (a list: each wiki's Templates/Pages files), and
-//     one tab per wiki for its wiki_rules.md.
+//   Agents and rules: an Agents tab listing the three agents (executive assistant, wiki reviewer,
+//     team wiki manager) with a way to see and edit each one's prompt, the page templates (a list: each
+//     wiki's Templates/Pages files), and the rules files: "My capture rules" and the Team wiki's.
 //   How Ingest works (the ? button): plain-language explanation with a picture of the agent loop.
 //   A past run (from Past runs): its transcript.json, request by request, with tokens and cost.
 
-import { RULES_FILE } from './vault.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
 export function createIngestDialogs(backdrop, {
-  getAgents, saveAgent, getWikis, saveRules, getPageTemplates, openPageTemplate, newPageTemplate, getLogRaw, setLogRaw, openRunFolder,
+  getAgents, saveAgent, resetAgent, getWikis, getRulesTabs, saveRules, getPageTemplates, openPageTemplate, newPageTemplate, getLogRaw, setLogRaw, openRunFolder,
 }) {
   let close = null;
 
@@ -40,10 +38,10 @@ export function createIngestDialogs(backdrop, {
   // ---- Agents and rules ------------------------------------------------------------------------
 
   async function openPrompt(startTab = 'agents') {
-    // [{ alias, path, color, text (or null when there's no rules file), starter }]: the rules are read
-    // through the path list (wiki.<alias>.rules), the starter from template.rules-starter.
-    const wikis = await getWikis();
-    // The four agents and their prompt files: [{ id, name, tab, job, path, text, default, changed }].
+    const wikis = await getWikis(); // [{ alias, color }]
+    // The rules files: [{ key, label, name, path, color, text (or null when missing), starter, about }].
+    const rulesTabs = await getRulesTabs();
+    // The three agents and their prompts: [{ id, name, tab, job, path, text, default, changed }].
     let agents = [];
     let agentsError = '';
     try {
@@ -54,7 +52,7 @@ export function createIngestDialogs(backdrop, {
     const tabs = [
       { id: 'agents', label: 'Agents', list: true },
       { id: 'templates', label: 'Page templates', list: true },
-      ...wikis.map((w) => ({ id: `rules:${w.alias}`, label: `${w.alias} rules`, alias: w.alias, path: w.path, color: w.color, exists: w.text !== null, text: w.text ?? w.starter })),
+      ...rulesTabs.map((w) => ({ id: `rules:${w.key}`, label: w.label, ruleName: w.name, about: w.about, path: w.path, color: w.color, exists: w.text !== null, text: w.text ?? w.starter })),
     ];
     // What's being edited, by key: a rules tab's id, or "agent:<id>" for an agent's prompt.
     const drafts = new Map([...tabs.filter((t) => !t.list).map((t) => [t.id, t.text]), ...agents.map((a) => [`agent:${a.id}`, a.text])]);
@@ -66,7 +64,7 @@ export function createIngestDialogs(backdrop, {
     show(
       `<div class="dialog ingest-dialog" role="dialog" aria-label="Agents and rules">
         <h2 class="dialog-title">Agents and rules</h2>
-        <p class="field-hint">Four agents do the Ingest view's work, one for each tab. Each has one prompt file. Every wiki's rules are added to what an agent is sent whenever it reads or writes in that wiki.</p>
+        <p class="field-hint">Three agents do the Ingest view's work. The rules are the main way to steer them: <strong>My capture rules</strong> steer capture and Review in your Personal wiki, and the <strong>Team wiki's rules</strong> steer Promotion. A View only wiki's rules are not used. The agents' own prompts are built in; most people never change them.</p>
         <div class="ingest-tabs" role="tablist">
           ${tabs.map((t) => `<button class="ingest-tab" role="tab" data-tab="${esc(t.id)}" ${t.color ? `style="--wiki:${esc(t.color)}"` : ''}>${esc(t.label)}</button>`).join('')}
         </div>
@@ -77,7 +75,7 @@ export function createIngestDialogs(backdrop, {
         <div class="dialog-actions">
           <span class="ingest-save-status"></span>
           <span class="spacer"></span>
-          <button class="secondary-button ingest-reset" hidden title="Put the prompt that ships with WikiApp back in the box. Nothing changes until you save.">Reset to default</button>
+          <button class="secondary-button ingest-reset" hidden title="Delete your copy of this prompt and use the built-in one again">Back to built-in</button>
           <button class="secondary-button" data-close>Close</button>
           <button class="primary-button ingest-save">Save</button>
         </div>
@@ -115,24 +113,24 @@ export function createIngestDialogs(backdrop, {
       area.hidden = !key;
       list.hidden = Boolean(key);
       saveButton.hidden = !key;
-      resetButton.hidden = !openAgent;
+      resetButton.hidden = !openAgent || agents.find((a) => a.id === openAgent)?.status === 'built_in';
       status.textContent = '';
       if (key) area.value = drafts.get(key);
       if (id === 'agents' && openAgent) {
         const agent = agents.find((a) => a.id === openAgent);
-        hint.innerHTML = `<button class="link-button ingest-back" data-back>← All agents</button> <strong>${esc(agent.name)}</strong> · the ${esc(agent.tab)} tab. This is the whole prompt, and it's a Claude Code skill: <code>${esc(agent.path)}</code>. WikiApp sends everything below the top block (the lines between the two <code>---</code>), then adds the material to work on and the rules of the wikis involved.`;
+        hint.innerHTML = `<button class="link-button ingest-back" data-back>← All agents</button> <strong>${esc(agent.name)}</strong> · the ${esc(agent.tab)} tab. ${agent.status === 'built_in' ? 'This is the <strong>built-in</strong> prompt; saving makes your own copy.' : 'This is your own copy of the prompt.'} Most people never need to change it: wiki rules do the same job. WikiApp sends everything below the top block (the lines between the two <code>---</code>), then adds the material to work on and the rules of the wikis involved.`;
       } else if (id === 'agents') {
-        hint.innerHTML = 'Each agent\'s prompt is one file, kept as a Claude Code skill on this computer, so the same text works when you call the skill in Claude Code. App updates never replace a prompt you\'ve edited.';
+        hint.innerHTML = 'Each agent\'s prompt is built in and improves with app updates. Most people never need to change one: wiki rules (in Settings) are the main way. If you do, saving makes your own copy, which app updates never replace.';
         drawAgents();
       } else if (tab.list) {
-        hint.innerHTML = `Pages the note taker and the team wiki manager may follow when they make a new page: the files in each wiki's <code>Templates/Pages</code> folder. An agent sees only every template's name and description (from its frontmatter), and opens a template only when it's about to propose a new page that fits.`;
+        hint.innerHTML = `Pages the team wiki manager may follow when it makes a new page: the files in each wiki's <code>Templates/Pages</code> folder. An agent sees only every template's name and description (from its frontmatter), and opens a template only when it's about to propose a new page that fits.`;
         drawTemplates();
       } else {
-        hint.innerHTML = `Saved as <code>${esc(tab.path || `${tab.alias}/${RULES_FILE}`)}</code> (the rules file in this wiki's entry in Settings). Every agent follows these when it works in this wiki.${tab.exists ? '' : ' This wiki has no rules file yet: saving creates one from this starter.'}`;
+        hint.innerHTML = `${esc(tab.about)} Saved as <code>${esc(tab.path || '(no path set)')}</code>.${tab.exists ? '' : ' There is no file yet: saving creates one from this starter.'}`;
       }
     }
 
-    // The four agents: who does which tab's work, and a way to see each one's prompt.
+    // The three agents: who does which tab's work, and a way to see each one's prompt.
     function drawAgents() {
       if (agentsError) {
         list.innerHTML = `<p class="field-error">The agents' prompt files couldn't be read: ${esc(agentsError)}</p>`;
@@ -142,7 +140,7 @@ export function createIngestDialogs(backdrop, {
         <tr>
           <td><strong>${esc(a.name)}</strong></td>
           <td><span class="ingest-kind">${esc(a.tab.toUpperCase())}</span></td>
-          <td>${esc(a.job)}${drafts.get(`agent:${a.id}`) !== a.default ? ' <span class="session-faint">Edited.</span>' : ''}</td>
+          <td>${esc(a.job)}${a.status === 'built_in' ? ' <span class="session-faint">Built in.</span>' : String(a.status || '').startsWith('customised') ? ' <span class="session-faint">Customised.</span>' : drafts.get(`agent:${a.id}`) !== a.default ? ' <span class="session-faint">Edited.</span>' : ''}</td>
           <td><button class="secondary-button" data-agent="${esc(a.id)}" title="${esc(a.path)}">See the prompt</button></td>
         </tr>`).join('');
       list.innerHTML = `<table class="ingest-template-list ingest-agent-list"><thead><tr><th>Agent</th><th>Tab</th><th>What it does</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
@@ -199,9 +197,23 @@ export function createIngestDialogs(backdrop, {
       if (tab) select(tab.dataset.tab);
     });
     dialog.querySelector('.ingest-lograw').addEventListener('change', (e) => setLogRaw(e.target.checked));
-    resetButton.addEventListener('click', () => {
-      area.value = agents.find((a) => a.id === openAgent).default;
-      status.textContent = 'The default is in the box. Save to use it.';
+    // Deletes the person's copy (resetPrompt), after asking, and shows the built-in prompt again.
+    resetButton.addEventListener('click', async () => {
+      const agent = agents.find((a) => a.id === openAgent);
+      if (!agent || !confirm(`Go back to the built-in "${agent.name}" prompt? Your copy of it is deleted.`)) return;
+      const result = await resetAgent(agent.slot);
+      if (result !== true) {
+        status.textContent = `Not reset: ${result}`;
+        return;
+      }
+      try {
+        const fresh = (await getAgents()).find((a) => a.id === agent.id);
+        if (fresh) Object.assign(agent, fresh);
+      } catch { /* the old text stays until the window is reopened */ }
+      drafts.set(`agent:${agent.id}`, agent.text);
+      saved.set(`agent:${agent.id}`, agent.text);
+      select('agents', agent.id);
+      status.textContent = 'Back to the built-in prompt.';
     });
     saveButton.addEventListener('click', async () => {
       const key = editing();
@@ -209,7 +221,7 @@ export function createIngestDialogs(backdrop, {
       const text = area.value.replace(/\r\n/g, '\n');
       saveButton.disabled = true;
       status.textContent = 'Saving…';
-      const result = openAgent ? await saveAgent(openAgent, text) : await saveRules(tab.alias, text, saved.get(key));
+      const result = openAgent ? await saveAgent(openAgent, text) : await saveRules(tab.ruleName, text, saved.get(key));
       saveButton.disabled = false;
       if (result === true) {
         drafts.set(key, text);
@@ -255,7 +267,7 @@ export function createIngestDialogs(backdrop, {
           <dt>Tool</dt><dd>An action the agent is allowed to take. Here it has exactly two: <em>Read a page</em> and <em>Propose a change</em>. It can't write, delete, browse the web or open any other file.</dd>
           <dt>Model</dt><dd>Which Claude does the work, picked next to each tab's button, and also in Settings (they are the same setting). The list comes from your Claude Code sign-in. Larger models cost more per run.</dd>
           <dt>Claude Agent SDK</dt><dd>The ready-made building block (a "software development kit") that runs the agent loop on your computer. It uses the Claude Code engine and your existing Claude Code sign-in, so there is no separate account or key.</dd>
-          <dt>Prompt</dt><dd>The written instructions Claude gets at the start: the agent's own prompt, a shared guide to writing tasks, and each wiki's rules. See and change them with <em>Agents and rules</em>, above the tabs.</dd>
+          <dt>Prompt</dt><dd>The written instructions Claude gets at the start: the agent's own prompt and the rules that apply (your capture rules, or the Team wiki's). See and change them with <em>Agents and rules</em>, above the tabs.</dd>
           <dt>Feedback</dt><dd>A note you write on a card (its ↻ button). On Submit, all the feedback goes to Claude in one message, with which cards you accepted and rejected. It continues the same conversation, so Claude still knows everything it read, and it revises those cards (or explains why not). It counts toward the same run's cost.</dd>
           <dt>Index</dt><dd>A one-line summary of every page (name, description, tags, sections, links), rebuilt each time you press Promote, so Claude knows what exists without reading every page.</dd>
           <dt>Card</dt><dd>One proposed change to one page, in that wiki's color. A new page shows a preview and lets you pick its folder.</dd>
@@ -277,7 +289,7 @@ export function createIngestDialogs(backdrop, {
     const name = (id) => id.slice(id.indexOf(':') + 1).replace(/\.md$/i, '');
 
     const upFront = [
-      ['System prompt (the agent\'s prompt, the task guide, wiki rules)', context.systemPrompt],
+      ['System prompt (the agent\'s prompt and the rules)', context.systemPrompt],
       ...Object.entries(context.indexes || {}).map(([alias, k]) => [`Index of ${alias}`, k]),
       ...Object.entries(context.notes || {}).map(([id, k]) => [`Note: ${name(id)}`, k]),
     ];

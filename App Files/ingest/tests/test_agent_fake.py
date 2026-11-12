@@ -57,11 +57,17 @@ class IngestTest(unittest.TestCase):
         write(self.personal / "saturn-trip.md", "---\ntype: topic\n---\n# Saturn trip\n\nSaw Titan on 10-28.\n")
         (base / "data").mkdir()
         (base / "skills").mkdir()
+        # The open wikis, as the app saves them: "personal" is the personal wiki and the one other
+        # wiki the team wiki (the roles an older setup gets; see pathlist.wiki_roles).
+        write(base / "data" / "settings.json", json.dumps({"workspace": [
+            {"alias": "team", "root": str(self.team)}, {"alias": "personal", "root": str(self.personal)}]}))
         self.run_folder = base / "data" / "ingest-runs" / "2026-11-12_100000"
         self.run_folder.mkdir(parents=True)
         self.env = mock.patch.dict(os.environ, {"WIKIAPP_DATA_DIR": str(base / "data"),
                                                 "WIKIAPP_SKILLS_DIR": str(base / "skills")})
         self.env.start()
+        import pathlist
+        pathlist.wiki_roles(persist=True, upgrade=True)   # as the host's start-up saves an older setup's roles
         self.events = []
         self.patches = [mock.patch.object(agent, "tell_app", self.events.append),
                         mock.patch.object(agent, "engine_choice", lambda: ("fake", {}))]
@@ -171,6 +177,59 @@ class IngestTest(unittest.TestCase):
         job = self.job()
         del job["agent"]
         self.assertEqual(self.start_run(job), 0)
+
+    # ---- Wiki roles: only the team wiki is ever proposed to ----
+
+    def with_northwind(self):
+        """A third open wiki, Northwind, with a page; it starts as view only. -> the job's wikis."""
+        import pathlist
+        northwind = Path(self.tmp.name) / "northwind"
+        write(northwind / "Moons.md", "---\ndescription: Moons.\n---\n# Moons\n\nTitan is a moon.\n")
+        write(northwind / "wiki_rules.md", "# Northwind rules\n\nNORTHWIND-RULES\n")
+        write(self.personal / "wiki_rules.md", "# Personal rules\n\nPERSONAL-RULES\n")
+        wikis = [{"alias": "team", "root": str(self.team)}, {"alias": "personal", "root": str(self.personal)},
+                 {"alias": "Northwind", "root": str(northwind)}]
+        write(Path(self.tmp.name) / "data" / "settings.json", json.dumps({"workspace": wikis}))   # opened later
+        self.assertEqual(pathlist.wiki_roles()["roles"], {"team": "team", "personal": "personal", "Northwind": "view"})
+        return wikis
+
+    def test_a_view_only_wiki_is_read_but_never_proposed_to(self):
+        wikis = self.with_northwind()
+        fake.script(NAME, [[
+            fake.call("read_page", {"page": "Northwind:Moons"}),           # reading it for context is fine
+            fake.call("propose_page", {"wiki": "Northwind", "page": "Northwind:Moons.md", "summary": "x", "from_notes": [TOPIC],
+                                       "edits": [{"find": "Titan is a moon.", "replace": "Titan is a big moon."}]}),
+            fake.call("propose_page", {"wiki": "Northwind", "new_path": "Titan.md", "summary": "x", "from_notes": [TOPIC],
+                                       "content": "# Titan\n"}),
+            fake.say("Done."),
+        ]])
+        self.assertEqual(self.start_run(dict(self.job(), wikis=wikis, targets=["team", "Northwind"])), 1)
+        self.assertIn("Northwind is view only; choose a team wiki in Settings.", self.done()["message"])  # the job itself refused
+        self.events.clear()
+        self.assertEqual(self.start_run(dict(self.job(), wikis=wikis)), 0)
+        calls = self.all_calls()
+        self.assertNotIn("error", calls[0])
+        for call in calls[1:]:
+            self.assertIn("Northwind is view only; choose a team wiki in Settings.", call["error"])
+        self.assertEqual(self.of("card"), [])
+        system = (self.run_folder / "system.md").read_text(encoding="utf-8")
+        self.assertIn('### Wiki "Northwind" (view only', system)
+        self.assertIn('### Wiki "team" (the team wiki', system)
+        # Only the team wiki's rules file is sent: not the personal wiki's, not a view-only wiki's.
+        self.assertIn("One page per planet.", system)
+        self.assertNotIn("NORTHWIND-RULES", system)
+        self.assertNotIn("PERSONAL-RULES", system)
+        self.assertEqual(system.count("<rules>"), 1)
+
+    def test_promotion_refuses_a_target_that_is_not_the_team_wiki(self):
+        import pathlist
+        wikis = self.with_northwind()
+        pathlist.set_wiki_role("Northwind", "team")                       # team demoted to view
+        self.assertEqual(self.start_run(dict(self.job(), wikis=wikis)), 1)
+        self.assertIn("team is view only; choose a team wiki in Settings.", self.done()["message"])
+        self.events.clear()
+        self.assertEqual(self.start_run(dict(self.job(), wikis=wikis, targets=["personal"])), 1)
+        self.assertIn("personal is your personal wiki", self.done()["message"])
 
     def test_state_is_the_promotion_tabs_only(self):
         from ingestruns import IngestRuns

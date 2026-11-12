@@ -109,7 +109,7 @@ In the tab bar, for every tab (`openPrompt` in `ingestdialogs.js`).
 - **The old "Your notes" file** (`~/.wikiapp/ingest/user-notes.md`) is not an input to this engine.
 
 **Rules**
-- A wiki's `wiki_rules.md` reaches every agent that works in that wiki. The team wiki manager gets every open wiki's rules; the executive assistant and the wiki reviewer get the personal wiki's.
+- A wiki's `wiki_rules.md` reaches every agent that works in that wiki. The team wiki manager gets the team wiki's rules only (each other wiki is named with its role, without rules); the executive assistant and the wiki reviewer get the personal capture rules instead of any `wiki_rules.md`.
 - A wiki without a rules file starts from a short starter, and saving creates the file.
 - `wiki_rules.md` is hidden from the graph, tags, tasks and link suggestions, like `Templates/`, but still shows in the file tree.
 
@@ -124,8 +124,8 @@ The Promotion tab (`createIngestView` with `mode: 'promotion'` in `main.js`) is 
 | Part | Promotion |
 |---|---|
 | Agent | Team wiki manager (`team-wiki-manager`; the job's `agent` may say so or be left out) |
-| The list | From the personal wiki chosen in the Sessions tab: topic and folder pages (frontmatter `type: topic` or `type: folder`) with no `promoted` time, or one earlier than `changed`; and `promotion-queue.md` while it has unticked (`- [ ]`) findings, listed first. **Show already promoted** lists promoted pages again |
-| Where changes may go | The job's `targets`: every open wiki except the personal one. A job without `targets` doesn't start; `tools.py` refuses a proposal anywhere else. |
+| The list | From the personal wiki (the wiki whose role is `personal`): topic and folder pages (frontmatter `type: topic` or `type: folder`) with no `promoted` time, or one earlier than `changed`; and `promotion-queue.md` while it has unticked (`- [ ]`) findings, listed first. **Show already promoted** lists promoted pages again |
+| Where changes may go | The team wiki only: the wiki whose role is `team` (Settings; `pathlist.wiki_roles`), which must also be in the job's `targets`. A job without `targets`, or with a target that isn't the team wiki, doesn't start (`agent.target_refusal`, with the role in plain words); `tools.py` refuses a proposal anywhere else. View-only wikis can still be read. |
 | First message opens | "Promote what is durable in the personal pages below into the team wiki." (the `prompt.promotion-first-message` slot) |
 | Default model | The engine settings' model for `team-wiki-manager` (`engine.json`, `pathlist.get_engine_settings()`), the one place it is kept; a model the job names wins |
 | Button | **Promote** |
@@ -233,7 +233,7 @@ Everything it receives is in [AGENT.md](AGENT.md). In short:
 |---|---|
 | Library | agentlib (`General-Purpose-Productivity/agentlib`), never an agent SDK directly. On the `claude` engine (the engine settings' default) it runs the Claude Agent SDK and the Claude Code engine that ships inside it. |
 | Sign-in | The computer's existing Claude Code login (`~/.claude`), or a gateway set by environment variables. No API key. `~/.claude/settings.json` is no longer read; a gateway's variables can go in the engine settings' `env` block. |
-| Instructions | The body of the team wiki manager's prompt (the `prompt.team-wiki-manager` slot), then each wiki's rules. |
+| Instructions | The body of the team wiki manager's prompt (the `prompt.team-wiki-manager` slot), then each wiki's role, and the team wiki's rules. |
 | Model | The one picked in the tab's model menu (the job's `settings.model`), else the engine settings' model for the agent. The Notes menu defaults to `claude-haiku-5-5`; the Promotion menu defaults to `claude-sonnet-5-5`. Effort `low`, adaptive thinking; a job's `settings.effort` can change the effort. Haiku is the Notes default on cost; see [AGENT.md §10](AGENT.md#10-model-choice-tested-2026-11-01). |
 | Tools | `read_page` and `propose_page`, plus `ask_reviewer` in a promotion. Every built-in tool is off (agentlib's lean setup), and anything else is denied (`never_ask`); `log.jsonl` records the tools offered. |
 | Context | Our system prompt only. No CLAUDE.md, settings, hooks, skills, subagents, plugins or other MCP servers. The skill file is read by our code and sent as the system prompt; Claude Code's own skill loading stays off. |

@@ -55,13 +55,15 @@ Three of WikiApp's four agents work on these wikis. Each has exactly one prompt 
 - What a model is sent is the body of that file (without the frontmatter), then what the code adds for that one request: the material, the wiki's rules and the reply format.
 - `WIKIAPP_SKILLS_DIR` names another skills folder, for tests.
 
-**Rules for a wiki** go in a `wiki_rules.md` file at the wiki's top level. The personal wiki's rules are sent with every capture and every topic review. `WIKI.md` only marks the folder as personal; its body is not sent to anyone.
+**Rules.** The personal wiki's rules are the user's own "My capture rules" file (`.wiki/capture-rules.md` in WikiApp's private folder; Settings, Rules). They are sent with every capture and every topic review. A team wiki's rules go in a `wiki_rules.md` file at its top level. `WIKI.md` only marks the folder as personal for the command line on its own; its body is not sent to anyone.
+
+**Which wiki is written to.** In WikiApp, each open wiki has a role (Settings): `personal`, `team` or `view` (see TECHNICAL.md §7.1). Every write command works only on the wiki whose role is `personal`, and refuses a team or view-only wiki in plain words; `WIKI.md` isn't needed there. On the command line without WikiApp's private folder, a folder whose `WIKI.md` says `type: personal` is the personal wiki, as before.
 
 ## In WikiApp
 
 This folder ships inside WikiApp, and the app's **Ingest** view is the easy way to use it:
 
-- **Sessions** tab: pick your personal wiki, press Set up once, then Ingest or Ingest all.
+- **Sessions** tab: give one wiki the personal role in Settings, press Set up once, then Ingest or Ingest all. Sessions show a readable name (`<date>-<a few words>`), how many subagents they used, and short sessions are hidden by the minimum-turns filter.
 - **Review** tab: the topics due for a review, Review or Review all, and folder and merge suggestions, each a card to accept or dismiss.
 - **Promotion** tab: sends topic pages, folder pages and the promotion queue to the team wiki manager.
 
@@ -87,7 +89,7 @@ A topic page has three headings: `## Current state`, `## Notes` and `## Log`. No
 Needs Python 3.9 or later and the Claude Code CLI. No packages to install.
 
 1. Copy `config.example.json` to `config.json` and set `personal_wiki` and `team_wiki` to the two wiki folders.
-2. Create the personal wiki's structure:
+2. Create the personal wiki's structure (on its own, `init` also writes `WIKI.md`, which marks the folder as personal for `sb.py`; inside WikiApp the wiki's role does that and no `WIKI.md` is made):
    ```
    python sb.py init
    ```
@@ -105,8 +107,8 @@ Needs Python 3.9 or later and the Claude Code CLI. No packages to install.
 ## Daily use
 
 ```
-python sb.py list                      # sessions waiting to be ingested
-python sb.py ingest <session-id>       # capture one (the first 8 characters of the id are enough)
+python sb.py list                      # sessions waiting to be ingested (--min-turns 0 shows short ones too)
+python sb.py ingest <session-id>       # capture one (its readable name, or the first 8 characters of the id, are enough)
 python sb.py skip <session-id>         # dismiss one
 python sb.py ingest-file recap.docx --date 2026-11-05    # a Teams meeting summary
 
@@ -137,7 +139,9 @@ Commands are masked before they are sent:
 
 The same masking applies to search patterns, web search queries and other tools' inputs. File paths for Read, Edit and Write are not masked, and neither is what you and Claude wrote in the conversation. A short ID, or a value outside a query, would still be included.
 
-Which sessions are read: sessions started through the Agent SDK (an entrypoint starting with `sdk`, WikiApp's own Notes and Promotion runs among them) are never listed, and neither are this tool's own model calls. Subagents' transcripts are never read.
+Which sessions are read: sessions started through the Agent SDK (an entrypoint starting with `sdk`, WikiApp's own Notes and Promotion runs among them) are never listed, and neither are this tool's own model calls.
+
+**Subagents are part of the session that started them**, never listed on their own. Each subagent's report back to the main conversation is in the condensed transcript under `## ASSISTANT (subagent)`, as `SUBAGENT "<task>" reported: ...`, with a few of its steps as one-liners after it; the assistant's instructions to it are shown, masked like a command, inside the assistant's message. None of it is labelled as yours, and the executive assistant treats it as the assistant's word: a subagent's finding is captured only when you confirmed it. Only your own messages count as turns.
 
 With the transcript go the agent's prompt, the personal wiki's rules, the index lines of the existing topics, and the tags in use, so the model can reuse a topic or a tag.
 
@@ -156,7 +160,8 @@ In `config.json`:
 | `lookback_days` | 14 | How far back `list` looks |
 | `review_after_entries` | 3 | New sessions on a topic before it is due for review |
 | `folder_after_topics` | 3 | Top-level topics that must share a tag before it is suggested as a folder |
-| `min_user_messages` | 2 | Sessions shorter than this are skipped without a model call |
+| `min_turns` | unset (3) | `list` hides sessions with fewer of your own messages than this (0: hide none). Read only without WikiApp's private folder: with one, WikiApp's Sessions filter decides (default 3). A session you name to `ingest` is captured however short |
+| `min_user_messages` | 2 | The older name for `min_turns`, read only when `min_turns` isn't set. Nothing is skipped by it any more |
 | `max_transcript_chars` | 160000 | The longest condensed transcript, or meeting file, that is sent |
 | `llm_timeout_seconds` | 300 | How long one model call may take |
 | `exclude_project_patterns` | `[]` | Hide sessions whose project folder name contains any of these |
@@ -175,7 +180,7 @@ secondbrain/          transcripts.py (find, condense and mask), llm.py (model ca
                       prompts.py (the agent's prompt plus what is added per request), cli.py, config.py
 skills/               wiki-capture, data-dictionary (placeholder)
 agents/               wiki-lookup
-templates/            personal-WIKI.md (the WIKI.md of a personal wiki), team-wiki_rules.md (to copy
+templates/            personal-WIKI.md (the WIKI.md that `init` writes on the command line on its own; WikiApp doesn't), team-wiki_rules.md (to copy
                       into a team wiki as wiki_rules.md)
 tests/                python -m unittest discover tests
 ../agents/            the three agents' default prompts (one SKILL.md each) and agentfiles.py

@@ -3,8 +3,9 @@
 Each request runs sessions/sb.py (see sessions/INTEGRATION.md) in this app's Python with no
 window, and returns the JSON it prints. sb.py does all the work: it lists the Claude Code
 sessions that haven't been captured, and captures one into the chosen personal wiki as a
-session note filed under topics. It refuses to write to a folder that isn't marked as a
-personal wiki (WIKI.md with `type: personal`), so a wrong choice here can't touch a team wiki.
+session note filed under topics. It refuses to write to a folder that isn't the personal wiki
+(the wiki whose role is "personal" in Settings; see pathlist.wiki_roles), so a wrong choice here
+can't touch a team or view-only wiki.
 
 Several captures may run at once (each page call has its own thread); sb.py locks its writes.
 """
@@ -57,8 +58,10 @@ class SessionRuns:
         return self.run("status", root, timeout=30)
 
     def setup(self, root):
-        self.run("init", root, timeout=30)
-        return self.status(root)
+        """Set up: the personal wiki's pages. -> status plus "created": exactly what was made in the
+        wiki ("Sessions/", "promotion-queue.md", "index.md"; never WIKI.md in the app)."""
+        created = self.run("init", root, timeout=30).get("created") or []
+        return {**self.status(root), "created": created}
 
     def list(self, root, days=None, include_done=False):
         extra = (["--days", str(int(days))] if days else []) + (["--all"] if include_done else [])
@@ -163,17 +166,14 @@ class SessionRuns:
 
 
 def personal_root(root=None):
-    """The personal wiki's folder: the one given, or else the one picked in the app (the
-    `sessionsWiki` setting, by default the folder with the alias "personal")."""
+    """The personal wiki's folder: the one given, or else the open wiki whose role is "personal"
+    (Settings; pathlist.wiki_roles). sb.py refuses a given folder that isn't the personal wiki."""
     if isinstance(root, str) and root:
         return root
     import pathlist
-    workspace = pathlist.read_workspace()
-    alias = pathlist.read_settings().get("sessionsWiki")
-    found = next((w for w in workspace if isinstance(alias, str) and w["alias"] == alias), None) \
-        or next((w for w in workspace if w["alias"].lower() == "personal"), None)
+    found = pathlist.wiki_with_role("personal")
     if not found:
-        raise ValueError("Pick your personal wiki in the Sessions tab first.")
+        raise ValueError("Choose your personal wiki in Settings first.")
     return found["root"]
 
 

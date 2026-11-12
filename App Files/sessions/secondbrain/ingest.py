@@ -91,8 +91,7 @@ def _capture_prompt(cfg, root: Path, wiki_cfg: dict, info: dict, kind: str, sour
                                        project=info.get("project") or "(unknown)")
     return prompts.build("executive-assistant", [
         ("This request", request),
-        ("This wiki's rules", wiki_cfg["_rules"] or "(none)"),
-        *prompts.personal_rules_section(),
+        *prompts.personal_rules_section(),   # the personal wiki's only rules: the capture rules file
         ("Existing topics", wiki.index_text(root) or "(no topics yet)"),
         *tagset.prompt_sections(),
         ("Existing tags", wiki.tags_text(root) or "(no tags yet)"),
@@ -129,11 +128,11 @@ def _record(cfg, info: dict, source_text: str, kind: str, dry_run: bool, ledger_
     if not data["worth_recording"]:
         with wiki.Lock(root):
             ledger = wiki.load_ledger(root)
-            ledger[info["session_id"]] = {
+            ledger[info["session_id"]] = _keep_name(ledger, info["session_id"], {
                 "status": "skipped", "at": _now(), "reason": data["skip_reason"] or "Nothing durable to record.",
                 "transcript_mtime": info.get("mtime"), "by": "model", "cost": spend["cost"], "title": data["title"],
                 **(ledger_extra or {}),
-            }
+            })
             wiki.save_ledger(root, ledger)
             wiki.add_spend(root, "capture", spend)
         return {**result, "status": "skipped", "reason": ledger[info["session_id"]]["reason"]}
@@ -144,8 +143,7 @@ def _record(cfg, info: dict, source_text: str, kind: str, dry_run: bool, ledger_
         if prior and (root / prior).exists():
             rel = prior
         else:
-            short = re.sub(r"[^A-Za-z0-9]", "", info.get("capture_id") or info["session_id"])[:8]
-            rel = f"{wiki.SESSIONS_DIR}/{info['date']}-{wiki.slugify(data['title'], 40)}-{short}.md"
+            rel = _new_record_path(root, info["date"], data["title"], info.get("capture_id") or info["session_id"])
         stem = Path(rel).stem
         topics = [wiki.upsert_topic(root, t, info["date"], stem) for t in data["topics"]]
         dropped = wiki.drop_note_from_topics(root, stem, keep={t["slug"] for t in topics})
@@ -157,10 +155,10 @@ def _record(cfg, info: dict, source_text: str, kind: str, dry_run: bool, ledger_
         used = {tag for t in topics for tag in t["tags"]}
         added = taglists.add_personal(root, [n for n in new_tags if n["tag"] in used])  # only tags actually used
         wiki.write_index(root)
-        ledger[info["session_id"]] = {
+        ledger[info["session_id"]] = _keep_name(ledger, info["session_id"], {
             "status": "ingested", "at": _now(), "note": rel, "transcript_mtime": info.get("mtime"), "cost": spend["cost"],
             "title": data["title"], **(ledger_extra or {}),
-        }
+        })
         wiki.save_ledger(root, ledger)
         wiki.add_spend(root, "capture", spend)
 
@@ -172,32 +170,128 @@ def _record(cfg, info: dict, source_text: str, kind: str, dry_run: bool, ledger_
             "new_tags": added}
 
 
+def _new_record_path(root: Path, date: str, title: str, ref: str) -> str:
+    """A new record's path: Sessions/<date>-<title words>.md. A short piece of the session's (or
+    note's) id is added only when another record already has that name."""
+    base = f"{wiki.SESSIONS_DIR}/{date}-{wiki.slugify(title, 40)}"
+    if not (root / f"{base}.md").exists():
+        return f"{base}.md"
+    short = re.sub(r"[^A-Za-z0-9]", "", ref).lower()
+    for n in (8, len(short)):
+        if short and not (root / f"{base}-{short[:n]}.md").exists():
+            return f"{base}-{short[:n]}.md"
+    n = 2
+    while (root / f"{base}-{n}.md").exists():
+        n += 1
+    return f"{base}-{n}.md"
+
+
+# ---------- readable session names ----------
+# Each session gets a short readable name, "<date>-<a few words>" (2026-11-12-churn-dashboard-fix),
+# shown instead of its id. The words come from Claude Code's name for the session (one the person
+# gave it, else the one Claude Code generated), else the person's first message: no request to a
+# model. A short piece of the id is added only when two names would clash. A name is kept in the
+# session's ledger entry once given, so it never changes; the id stays the hidden reference.
+
+NAME_WORDS = 5
+
+
+def _keep_name(ledger: dict, key: str, entry: dict) -> dict:
+    """A new ledger entry for key that keeps the name the session was given."""
+    name = (ledger.get(key) or {}).get("name") if isinstance(ledger.get(key), dict) else None
+    return {**entry, "name": name} if name else entry
+
+
+def _name_base(meta: dict) -> str:
+    words = wiki.slugify(meta.get("named_title") or meta.get("first_prompt") or meta.get("title") or "", 48).split("-")
+    words = [w for w in words if w][:NAME_WORDS]
+    phrase = "-".join(words)
+    if phrase == "untitled" or not phrase:
+        phrase = "session"
+    return f"{meta['date']}-{phrase}"
+
+
+def new_name(meta: dict, taken: set) -> str:
+    base = _name_base(meta)
+    if base not in taken:
+        return base
+    short = re.sub(r"[^a-z0-9]", "", str(meta["session_id"]).lower())
+    for n in (4, 8, len(short)):
+        if short and f"{base}-{short[:n]}" not in taken:
+            return f"{base}-{short[:n]}"
+    n = 2
+    while f"{base}-{n}" in taken:
+        n += 1
+    return f"{base}-{n}"
+
+
+def assign_names(cfg, metas: list[dict], save: bool = True) -> dict[str, str]:
+    """{session id: name} for these sessions: the name each was given before, or a new one. New
+    names are saved in the ledger when save (only in a folder writes are allowed in: see
+    wiki.require_personal); otherwise they are worked out for this answer only."""
+    root = cfg.personal
+    ledger = wiki.load_ledger(root)
+
+    def given(sid):
+        entry = ledger.get(sid)
+        return entry.get("name") if isinstance(entry, dict) else None
+
+    missing = [m for m in metas if not given(m["session_id"])]
+    if missing and save and wiki.is_personal(root):
+        with wiki.Lock(root):
+            ledger = wiki.load_ledger(root)
+            taken = {e.get("name") for e in ledger.values() if isinstance(e, dict) and e.get("name")}
+            for meta in sorted(missing, key=lambda m: (m["date"], m["mtime"])):
+                if not given(meta["session_id"]):
+                    name = new_name(meta, taken)
+                    taken.add(name)
+                    ledger.setdefault(meta["session_id"], {})["name"] = name
+            wiki.save_ledger(root, ledger)
+        missing = []
+    out = {m["session_id"]: given(m["session_id"]) for m in metas if given(m["session_id"])}
+    taken = set(out.values()) | {e.get("name") for e in ledger.values() if isinstance(e, dict) and e.get("name")}
+    for meta in missing:   # not saved: worked out for this answer only
+        out[meta["session_id"]] = new_name(meta, taken)
+        taken.add(out[meta["session_id"]])
+    return out
+
+
+def resolve_session(cfg, ref: str):
+    """A transcript by session id (or an unambiguous prefix), or by the readable name it was given."""
+    try:
+        return transcripts.find_session(cfg, ref)
+    except FileNotFoundError:
+        ledger = wiki.load_ledger(cfg.personal)
+        sid = next((k for k, e in ledger.items() if isinstance(e, dict) and e.get("name") == ref), None)
+        if not sid:
+            raise
+        return transcripts.find_session(cfg, sid)
+
+
 def ingest_session(cfg, session_id: str, dry_run: bool = False, force: bool = False, only_new: bool = False) -> dict:
     """only_new: a session already captured, whose transcript hasn't changed since, is not sent
-    again (the app always asks this way; the command line re-captures unless --only-new)."""
-    path = transcripts.find_session(cfg, session_id)
+    again (the app always asks this way; the command line re-captures unless --only-new).
+    session_id may also be the session's readable name. A session chosen here is captured however
+    few turns it has: the minimum-turns filter only hides sessions from the list (and so from
+    "ingest all"). force is kept for older callers; it changes nothing now."""
+    path = resolve_session(cfg, session_id)
     info = transcripts.read_meta(path)
     info["source"] = "claude-code"
+    if not dry_run:
+        wiki.require_personal(cfg.personal)   # a team or view-only wiki is refused before anything is sent
+    info["name"] = assign_names(cfg, [info], save=not dry_run).get(info["session_id"])
     if only_new:
         entry = wiki.load_ledger(cfg.personal).get(info["session_id"]) or {}
         if entry.get("status") == "ingested" and info["mtime"] <= (entry.get("transcript_mtime") or 0) + 2:
-            return {"session_id": info["session_id"], "title": entry.get("title") or info["title"], "status": "unchanged",
-                    "note": entry.get("note"), "reason": "Already captured, and the session hasn't changed since.",
+            return {"session_id": info["session_id"], "name": info["name"], "title": entry.get("title") or info["title"],
+                    "status": "unchanged", "note": entry.get("note"),
+                    "reason": "Already captured, and the session hasn't changed since.",
                     "topics": [], "warnings": [], "conflicts": []}
-    if info["user_messages"] < cfg.min_user_messages and not force:
-        reason = f"Only {info['user_messages']} user message(s); below the minimum of {cfg.min_user_messages}."
-        if not dry_run:
-            root = cfg.personal
-            wiki.require_personal(root)
-            with wiki.Lock(root):
-                ledger = wiki.load_ledger(root)
-                ledger[info["session_id"]] = {
-                    "status": "skipped", "at": _now(), "reason": reason, "transcript_mtime": info["mtime"], "by": "rule",
-                }
-                wiki.save_ledger(root, ledger)
-        return {"session_id": info["session_id"], "title": info["title"], "status": "skipped", "reason": reason, "warnings": []}
+    if info["user_messages"] == 0:
+        return {"session_id": info["session_id"], "name": info["name"], "title": info["title"], "status": "skipped",
+                "reason": "The session has no message from you.", "warnings": []}
     text = transcripts.condense(path, cfg.max_transcript_chars)
-    return _record(cfg, info, text, "session", dry_run)
+    return {"name": info["name"], **_record(cfg, info, text, "session", dry_run)}
 
 
 def _read_source_file(path: Path) -> str:
@@ -437,25 +531,32 @@ def ingest_note(cfg, file_path: str, dry_run: bool = False, force: bool = False)
 
 
 def skip_session(cfg, session_id: str, reason: str) -> dict:
-    path = transcripts.find_session(cfg, session_id)
+    path = resolve_session(cfg, session_id)
     root = cfg.personal
     wiki.require_personal(root)
+    meta = transcripts.read_meta(path)
+    name = assign_names(cfg, [meta]).get(path.stem)
     with wiki.Lock(root):
         ledger = wiki.load_ledger(root)
-        ledger[path.stem] = {
+        ledger[path.stem] = _keep_name(ledger, path.stem, {
             "status": "skipped", "at": _now(), "reason": reason or "Skipped by user.",
             "transcript_mtime": path.stat().st_mtime, "by": "user",
-        }
+        })
         wiki.save_ledger(root, ledger)
-    return {"session_id": path.stem, "status": "skipped", "reason": ledger[path.stem]["reason"]}
+    return {"session_id": path.stem, "name": name, "status": "skipped", "reason": ledger[path.stem]["reason"]}
 
 
-def list_sessions(cfg, days: int | None = None, include_done: bool = False) -> list[dict]:
-    """Sessions in the lookback window with their ingest status: new, updated, ingested or skipped."""
+def list_sessions(cfg, days: int | None = None, include_done: bool = False, min_turns: int | None = None) -> dict:
+    """Sessions in the lookback window with their ingest status (new, updated, ingested or skipped):
+    {"sessions": [rows], "hidden_count": N, "min_turns": N}. A session with fewer of the person's own
+    messages than min_turns (default: cfg.hide_below(), the Sessions filter) is left out and only
+    counted in hidden_count; 0 hides none."""
+    min_turns = cfg.hide_below() if min_turns is None else max(0, int(min_turns))
     ledger = wiki.load_ledger(cfg.personal)
-    out = []
+    shown, hidden = [], 0
     for meta in transcripts.recent_sessions(cfg, days):
         entry = ledger.get(meta["session_id"])
+        entry = entry if isinstance(entry, dict) and entry.get("status") else None   # a name alone: still new
         if not entry:
             status = "new"
         elif entry["status"] == "ingested" and meta["mtime"] > (entry.get("transcript_mtime") or 0) + 2:
@@ -464,10 +565,19 @@ def list_sessions(cfg, days: int | None = None, include_done: bool = False) -> l
             status = entry["status"]
         if status in ("ingested", "skipped") and not include_done:
             continue
-        row = {k: meta[k] for k in ("session_id", "title", "date", "last_active", "project", "entrypoint", "user_messages", "first_prompt")}
+        if meta["user_messages"] < min_turns:
+            hidden += 1
+            continue
+        shown.append((meta, entry, status))
+    names = assign_names(cfg, [m for m, _, _ in shown]) if shown else {}
+    rows = []
+    for meta, entry, status in shown:
+        row = {k: meta[k] for k in ("session_id", "title", "date", "last_active", "project", "entrypoint", "user_messages",
+                                    "subagents", "first_prompt")}
+        row["name"] = names.get(meta["session_id"])
         row["status"] = status
         if entry:
             row["note"] = entry.get("note")
             row["reason"] = entry.get("reason")
-        out.append(row)
-    return out
+        rows.append(row)
+    return {"sessions": rows, "hidden_count": hidden, "min_turns": min_turns}

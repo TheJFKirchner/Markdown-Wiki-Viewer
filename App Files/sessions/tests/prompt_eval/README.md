@@ -12,7 +12,7 @@ From this folder, with the app's Python:
 ..\..\..\.venv\Scripts\python.exe run_eval.py --work <scratch folder outside the project> --label after --rounds 3
 ```
 
-- `--work` must be outside the project. Everything is made there: a private `.wiki` folder, a personal wiki, a small team wiki, transcripts and notes. Each case runs on its own copy, through `WIKIAPP_DATA_DIR`, so the user's own folders, wikis and transcripts are never read or written.
+- `--work` must be outside the project. Everything is made there: a private `.wiki` folder, a personal wiki, a small team wiki, transcripts and notes. Each case runs on its own copy, through `WIKIAPP_DATA_DIR`, so the user's own folders, wikis and transcripts are never read or written. Each copy's `settings.json` opens its `personal` and `team` wikis, which get the personal and team roles.
 - `--only C1,R2` runs some cases. `--capture-model`, `--review-model`, `--promotion-model` pick the models (Haiku by default for all three).
 - Raw results are kept in `<work>/<label>/r<round>/<case>/result.json`, and the table in `<work>/<label>/summary.json`.
 
@@ -26,6 +26,9 @@ From this folder, with the app's Python:
 | C4 | session capture | a long session with figures and explanations and nothing the analyst stated |
 | C5 | session capture | a general explanation the analyst only acknowledges |
 | C6 | session capture | the analyst states a rule and says what they still need to do |
+| S1 | session capture | a subagent's finding, relayed by the assistant and confirmed by the analyst (captured) |
+| S2 | session capture | a background subagent reports a data problem the analyst never acknowledges (not captured) |
+| S3 | session capture | the assistant's instructions to a subagent state facts the analyst never said (never captured as the analyst's) |
 | N1 | note capture | numbers to keep; a checkbox to-do |
 | N2 | note capture | a method for every customer, written while working for one client |
 | N3 | note capture | a check for every client's files, first met with a new client |

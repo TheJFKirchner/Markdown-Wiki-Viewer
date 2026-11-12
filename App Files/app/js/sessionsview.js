@@ -6,6 +6,7 @@
 // wrote. See sessions/README.md and sessions/INTEGRATION.md.
 
 import { HAIKU, chosenModel, modelMenu, rememberModel } from './modelmenu.js';
+import { rolePrompt, roleBadge } from './roles.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -16,12 +17,14 @@ const DAYS = 14;
 const folderName = (path) => String(path || '').split(/[\\/]/).filter(Boolean).pop() || '';
 
 export function createSessionsView(container, deps) {
-  const { call, getFolders, findFolder, reload, openPage, toast, onChange } = deps;
+  const { call, getFolders, findFolder, getPersonalWiki, reload, openPage, toast, onChange } = deps;
   let rows = null;          // the sessions waiting, or null before the first list
   let status = null;        // the chosen folder's sb.py status, or null
   let error = '';
   let loading = false;
   let loadedFor = '';       // the folder root the list was made for
+  let hidden = 0;           // sessions left out by the turns filter
+  let filter = { min_turns: 0, options: [0, 3, 5, 10, 20] }; // getSessionsFilter
   let batch = null;         // Ingest all: { total, done, current, stop }
   const working = new Set(); // session ids being captured or skipped
   const results = [];       // what each capture wrote, newest first (this app run only)
@@ -31,11 +34,8 @@ export function createSessionsView(container, deps) {
 
   // ---- Which wiki ---------------------------------------------------------------------------
 
-  // The personal wiki: the one picked here, else the folder called "personal", else none.
-  function wiki() {
-    const folders = getFolders();
-    return findFolder(get('sessionsWiki')) || folders.find((f) => f.alias.toLowerCase() === 'personal') || null;
-  }
+  // The personal wiki: the connected wiki whose role is Personal (Settings), else none.
+  const wiki = () => getPersonalWiki();
 
   // Sessions a script started through the Agent SDK, and subagents' own transcripts, are never listed (sb.py leaves them out).
   const shown = () => rows || [];
@@ -50,7 +50,11 @@ export function createSessionsView(container, deps) {
     draw();
     try {
       status = await call('sessionsStatus', { root: folder.root });
-      rows = status.personal ? await call('sessionsList', { root: folder.root, days: DAYS }) : null;
+      filter = await call('getSessionsFilter').catch(() => filter);
+      const listed = status.set_up ? await call('sessionsList', { root: folder.root, days: DAYS }) : null;
+      rows = Array.isArray(listed) ? listed : listed ? listed.sessions || listed.rows || listed.items || [] : null;
+      hidden = (!Array.isArray(listed) && listed?.hidden_count) || 0;
+      if (!Array.isArray(listed) && listed?.min_turns !== undefined) filter = { ...filter, min_turns: listed.min_turns };
       loadedFor = folder.root;
     } catch (err) {
       error = err.message;
@@ -80,7 +84,7 @@ export function createSessionsView(container, deps) {
           <header class="ingest-cards-header">
             <h2>Captured</h2>
             ${spendTotal()}
-            <span class="ingest-count">${status?.personal ? `${plural(status.topics, 'topic')} · ${plural(status.sessions, 'session note')}${status.queue_pending ? ` · ${status.queue_pending} for the team wiki` : ''}` : ''}</span>
+            <span class="ingest-count">${status?.set_up ? `${plural(status.topics, 'topic')} · ${plural(status.sessions, 'session note')}${status.queue_pending ? ` · ${status.queue_pending} for the team wiki` : ''}` : ''}</span>
           </header>
           <div class="ingest-cards">${results.length ? results.map(resultCard).join('') : '<p class="ingest-empty">What each session added to your wiki appears here.</p>'}</div>
         </section>
@@ -102,27 +106,30 @@ export function createSessionsView(container, deps) {
     return `<p class="session-faint" title="${esc(COST_HINT)}">≈ ${money(r.spend.cost)} at API prices · ${esc(r.spend.model || '')} · ${r.spend.tokens_in.toLocaleString()} tokens in, ${r.spend.tokens_out.toLocaleString()} out</p>`;
   }
 
+  const filterMenu = () => `
+    <label class="session-wiki">
+      <span>Hide sessions under</span>
+      <select data-action="min-turns" ${batch || working.size ? 'disabled' : ''}>
+        ${(filter.options || [0, 3, 5, 10, 20]).map((n) => `<option value="${n}" ${Number(filter.min_turns) === n ? 'selected' : ''}>${n ? `${n} turns` : 'Off'}</option>`).join('')}
+      </select>
+      ${hidden ? `<span class="session-faint">${hidden} hidden</span>` : ''}
+    </label>`;
+
   function left(folder) {
     const folders = getFolders();
-    if (!folders.length) return '<p class="ingest-empty">Add your personal wiki\'s folder first.</p>';
-    const picker = `
-      <label class="session-wiki">
-        <span>Personal wiki</span>
-        <select data-action="wiki" ${batch || working.size ? 'disabled' : ''}>
-          ${folder ? '' : '<option value="" selected>Choose a folder</option>'}
-          ${folders.map((f) => `<option value="${esc(f.alias)}" ${f === folder ? 'selected' : ''}>${esc(f.alias)}</option>`).join('')}
-        </select>
-      </label>`;
-    if (!folder) return `${picker}<p class="ingest-empty">Choose which folder is your personal wiki. Sessions are only ever written there.</p>`;
+    if (!folders.length) return '<p class="ingest-empty">Add a wiki folder first, then make it your Personal wiki in Settings.</p>';
+    if (!folder) return rolePrompt('personal');
+    const picker = `<p class="session-faint">Personal wiki: <strong>${esc(folder.alias)}</strong> ${roleBadge(folder.alias)}</p>`;
     if (error) return `${picker}<div class="ingest-setup"><p class="field-error">${esc(error)}</p><button class="secondary-button" data-action="refresh">Try again</button></div>`;
     if (loading && !rows) return `${picker}<p class="ingest-empty">Reading your sessions…</p>`;
-    if (status && !status.personal) return picker + setupBox(folder);
+    if (status && !status.set_up) return picker + setupBox(folder);
     if (!rows) return picker;
 
     const list = shown();
     return `
       ${picker}
-      <div class="ingest-list">${list.length ? list.map(sessionRow).join('') : '<p class="ingest-empty">Nothing is waiting. Every session from the last two weeks has been ingested or skipped.</p>'}</div>
+      ${filterMenu()}
+      <div class="ingest-list">${list.length ? list.map(sessionRow).join('') : `<p class="ingest-empty">Nothing is waiting. Every session from the last two weeks has been ingested or skipped${hidden ? `, or is hidden by the turns filter` : ''}.</p>`}</div>
       <div class="session-options">
         <span class="spacer"></span>
         ${modelMenu({ agent: 'executive-assistant', fallback: HAIKU, disabled: Boolean(batch || working.size), what: 'ingesting sessions' })}
@@ -133,12 +140,10 @@ export function createSessionsView(container, deps) {
   }
 
   function setupBox(folder) {
-    const other = status.type ? `This folder is marked as a <strong>${esc(status.type)}</strong> wiki, so sessions can't be written to it. Choose another folder.` : '';
     return `
       <div class="ingest-setup">
-        ${other ? `<p>${other}</p>` : `
-          <p><strong>Make ${esc(folder.alias)} your personal wiki?</strong> This adds a <code>WIKI.md</code> file marking it as personal, an <code>index.md</code>, a <code>promotion-queue.md</code> and a <code>Sessions</code> folder. Topic pages are added at the top of the folder as sessions are ingested. Nothing already in the folder is changed.</p>
-          <button class="primary-button" data-action="setup">Set up ${esc(folder.alias)}</button>`}
+        <p><strong>Set up ${esc(folder.alias)} for capture?</strong> This adds an <code>index.md</code>, a <code>promotion-queue.md</code> and a <code>Sessions</code> folder. Topic pages are added at the top of the folder as sessions are ingested. Nothing already in the folder is changed.</p>
+        <button class="primary-button" data-action="setup">Set up ${esc(folder.alias)}</button>
       </div>`;
   }
 
@@ -149,8 +154,10 @@ export function createSessionsView(container, deps) {
     return `
       <div class="session-row${busy ? ' working' : ''}" title="${esc(row.first_prompt)}">
         <div class="session-main">
-          <span class="session-title">${esc(row.title || row.session_id)}${row.status === 'updated' ? '<span class="session-tag" title="Ingested before, then continued. Ingesting again replaces its note.">CONTINUED</span>' : ''}</span>
+          <span class="session-title">${esc(row.name || row.title || 'Untitled session')}${row.status === 'updated' ? '<span class="session-tag" title="Ingested before, then continued. Ingesting again replaces its note.">CONTINUED</span>' : ''}</span>
+          ${row.name && row.title ? `<span class="session-meta session-subtitle">${esc(row.title)}</span>` : ''}
           <span class="session-meta">${esc(meta)}</span>
+          ${row.subagents > 0 ? `<span class="session-meta session-subagents" title="Subagents the session started are folded into it">${plural(row.subagents, 'subagent')}</span>` : ''}
         </div>
         <button class="secondary-button" data-action="skip" data-id="${esc(row.session_id)}" ${off} title="Leave this session out. Nothing is written.">Skip</button>
         <button class="secondary-button" data-ai data-action="ingest" data-id="${esc(row.session_id)}" ${off}>${busy ? 'Ingesting…' : 'Ingest'}</button>
@@ -180,7 +187,6 @@ export function createSessionsView(container, deps) {
       body = `
         <p>${link(r.note, 'Session note')}${topics.length ? ` · filed under ${topics.join(', ')}` : ''}</p>
         ${(r.tags || []).length ? `<p class="session-faint">${r.tags.map((t) => `#${esc(t)}`).join(' ')}</p>` : ''}
-        ${r.tasks || r.tasks_updated ? `<p class="session-faint">${[r.tasks && `${plural(r.tasks, 'task')} in the note`, r.tasks_updated && `${plural(r.tasks_updated, 'earlier task')} updated`].filter(Boolean).join(' · ')}.</p>` : ''}
         ${(r.new_tags || []).length ? `<p class="session-faint">${plural(r.new_tags.length, 'new tag')} added to your personal tags: ${r.new_tags.map((t) => `#${esc(t.tag)}${t.description ? ` (${esc(t.description)})` : ''}`).join(', ')}.</p>` : ''}
         ${r.queued_findings ? `<p class="session-faint">${plural(r.queued_findings, 'data finding')} added to the ${link('promotion-queue.md', 'promotion queue')} for the team wiki.</p>` : ''}
         ${(r.warnings || []).map((w) => `<p class="session-warning">${esc(w)}</p>`).join('')}
@@ -210,12 +216,12 @@ export function createSessionsView(container, deps) {
     try {
       result = await call('sessionsIngest', { root: folder.root, id, model: chosenModel('executive-assistant', HAIKU) });
       rows = rows.filter((r) => r.session_id !== id);
-      if (status?.personal && result.spend?.calls) {
+      if (status?.set_up && result.spend?.calls) {
         const total = ((status.spend ||= {}).capture ||= { cost: 0, runs: 0 });
         total.cost += result.spend.cost;
         total.runs += 1;
       }
-      if (status?.personal && result.status === 'ingested') {
+      if (status?.set_up && result.status === 'ingested') {
         status.sessions += row.status === 'updated' ? 0 : 1;
         status.topics += (result.topics || []).filter((t) => t.created).length;
         status.queue_pending += result.queued_findings || 0;
@@ -224,7 +230,7 @@ export function createSessionsView(container, deps) {
       result = { title: row.title, error: err.message };
     }
     working.delete(id);
-    results.unshift({ ...result, title: result.title || row.title, alias: folder.alias });
+    results.unshift({ ...result, title: result.name || row.name || result.title || row.title, alias: folder.alias });
     draw();
     onChange();
     // The new pages show in the file tree, the graph and search, and a topic may now be due for review.
@@ -299,11 +305,15 @@ export function createSessionsView(container, deps) {
   function onInput(e) {
     if (rememberModel(e)) return draw();
     const action = e.target.dataset.action;
-    if (action === 'wiki') {
-      set('sessionsWiki', e.target.value);
-      rows = null;
-      status = null;
-      load();
+    if (action === 'min-turns') {
+      call('setSessionsFilter', { min_turns: Number(e.target.value) })
+        .then((next) => {
+          filter = next || filter;
+          rows = null;
+          loadedFor = '';
+          load();
+        })
+        .catch((err) => toast(`Couldn't change the filter: ${err.message}`));
     }
   }
 
@@ -315,6 +325,13 @@ export function createSessionsView(container, deps) {
       else draw();
     },
     count: () => (rows ? shown().length : 0),
+    // The roles changed: another wiki may now be the personal one.
+    rolesChanged() {
+      rows = null;
+      status = null;
+      loadedFor = '';
+      draw();
+    },
     // The personal wiki's folder: the Review and Promotion tabs work on the same one.
     wiki,
   };

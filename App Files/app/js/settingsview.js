@@ -14,17 +14,20 @@ import { call, on } from './bridge.js';
 import { insideWiki, wikiWarning } from './setup.js';
 import { refreshAi, aiState, onAiChange } from './ai.js';
 import { syncEngineModels } from './modelmenu.js';
+import { ROLE_LABEL, ROLE_HELP, roleOf, roleBadge, setRole, onRolesChange } from './roles.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const STATUS = {
+  built_in: ['Built in', 'No copy exists: the app\'s own version is in use, and it improves with app updates.'],
   default: ['Default', 'An unedited copy of the text WikiApp ships; it follows newer defaults by itself.'],
   customised: ['Customised', 'You have edited it.'],
-  customised_newer_default: ['Customised, newer default available', 'You have edited it, and WikiApp now ships a different default. Reset to default to take the new one (your text is replaced).'],
+  customised_newer_default: ['Customised, newer built-in available', 'You have edited it, and WikiApp now ships a different built-in. Go back to built-in to take the new one (your copy is deleted).'],
 };
+const isPrompt = (r) => r.name.startsWith('prompt.');
 const PROGRESS_ROWS = ['progress', 'run_history', 'indexes', 'pending_notes', 'pending_promotion'];
 
 export function createSettingsView(container, deps) {
-  const { getFolders, openInEditor, onChanged, toast, getPersonal, setPersonal } = deps;
+  const { getFolders, openInEditor, onChanged, toast } = deps;
   const dialog = document.getElementById('settings-dialog');
   let rows = [];
   let first = null;     // firstRunState: from_env, location...
@@ -37,8 +40,12 @@ export function createSettingsView(container, deps) {
   let error = '';
   let installing = false;
   let installMessage = '';
+  let advancedOpen = false;
 
   container.addEventListener('click', onClick);
+  container.addEventListener('toggle', (e) => {
+    if (e.target.matches?.('.settings-advanced')) advancedOpen = e.target.open;
+  }, true);
   container.addEventListener('change', onChange_);
   on('agentlibInstalled', async (result) => {
     installing = false;
@@ -47,6 +54,7 @@ export function createSettingsView(container, deps) {
     await load();
   });
   onAiChange(() => draw());
+  onRolesChange(() => { if (rows.length) load(); });
 
   async function load() {
     try {
@@ -77,34 +85,41 @@ export function createSettingsView(container, deps) {
     }
     const take = (names) => names.map(byName).filter(Boolean);
     const appRows = take(['app_folder', 'pointer_file', 'path_list']);
-    const wikis = wikiGroups().map((g) => [g, rows.filter((r) => r.group === g)]);
+    // A wiki's rules steer Promotion, so only the Team wiki's rules row is offered: none for a Personal or View only wiki.
+    const allRules = rows.filter((r) => /^wiki\..+\.rules$/.test(r.name));
+    const ruleRows = allRules.filter((r) => (r.role || roleOf(r.name.slice(5, -6))) === 'team');
+    const capture = take(['personal_capture_rules']);
+    const templates = rows.filter((r) => r.name.startsWith('template.'));
+    const advanced = rows.filter((r) => isPrompt(r) || (r.tier === 'advanced' && !r.name.startsWith('template.')));
+    const wikis = wikiGroups().map((g) => [g, rows.filter((r) => r.group === g && !/^wiki\..+\.rules$/.test(r.name))]).filter(([, r]) => r.length);
     const notes = take(['notes_folder']);
-    const personalRows = take(['personal_capture_rules']);
-    const prompts = rows.filter((r) => r.group === 'Prompts' && r.name !== 'personal_capture_rules');
-    const templates = rows.filter((r) => r.group === 'Templates');
     const progress = take(PROGRESS_ROWS);
     const transcripts = take(['transcripts', 'sessions_config']);
     const lib = take(['agentlib']);
-    const claimed = new Set([...appRows, ...notes, ...personalRows, ...prompts, ...templates, ...progress, ...transcripts, ...lib, ...wikis.flatMap(([, r]) => r)].map((r) => r.name));
+    const claimed = new Set([...appRows, ...allRules, ...capture, ...templates, ...advanced, ...notes, ...progress, ...transcripts, ...lib, ...wikis.flatMap(([, r]) => r)].map((r) => r.name));
     const other = rows.filter((r) => !claimed.has(r.name));
 
     container.innerHTML = `
       <div class="settings">
         <h1>Settings</h1>
-        <p class="field-hint">Every file and folder WikiApp uses is listed here. A path that is missing is shown as missing; nothing is made again just because you looked.</p>
-        ${section('WikiApp\'s private folder', 'Everything private to you lives in this folder. Change location asks whether to move it or adopt another.', appRows)}
-        ${wikis.map(([g, r]) => section(`${g.replace('Wiki: ', '')} wiki`, 'Connected wiki. Its rules file, templates, index and progress.', r)).join('')}
+        <p class="field-hint">A path that is missing is shown as missing; nothing is made again just because you looked.</p>
+        <section class="settings-group"><h2>Rules</h2>
+          <p class="field-hint">These are the main way to change how the agents behave: your own capture rules (for your Personal wiki), and the Team wiki's rules (which steer Promotion).</p>
+          ${ruleRows.map((r) => row(r)).join('')}
+          ${capture.map((r) => row(r, 'Your own rules for what gets captured into your personal wiki: what to pick out of a session or note, and what earns its own page.')).join('')}
+        </section>
+        ${wikisSection()}
+        ${section('Note templates', 'The Daily and Weekly notes the New note menu makes. A wiki\'s own Templates folder takes precedence.', templates)}
         ${section('Notes folder', 'The folder inside each wiki that holds quick notes. One setting for every wiki.', notes)}
-        ${personalSection(personalRows)}
-        <details class="settings-group"><summary><h2>Prompts and templates</h2></summary>
-          <p class="field-hint">Text WikiApp ships a default for. A copy is kept in your private folder, so your edits survive app updates.</p>
-          ${prompts.length ? `<h3>Prompts</h3>${prompts.map((r) => row(r)).join('')}` : ''}
-          ${templates.length ? `<h3>Templates</h3>${templates.map((r) => row(r)).join('')}` : ''}
-        </details>
+        ${wikis.map(([g, r]) => section(`${g.replace('Wiki: ', '')} wiki · ${ROLE_LABEL[roleOf(g.replace('Wiki: ', ''))]}`, 'Connected wiki: its templates, index and progress.', r)).join('')}
+        ${section('WikiApp\'s private folder', 'Everything private to you lives in this folder. Change location asks whether to move it or adopt another.', appRows)}
         ${section('Progress and run history', 'What past runs and captures left behind, and what is waiting for review.', progress)}
         ${other.length ? section('Other app data', 'Settings, window position and engine settings.', other) : ''}
         ${section('Claude Code transcripts', 'Where Claude Code keeps session transcripts (read for the Sessions tab).', transcripts)}
         ${engineSection(lib)}
+        ${advanced.length ? `<details class="settings-group settings-advanced" ${advancedOpen ? 'open' : ''}><summary><h2>Advanced</h2></summary>
+          <p class="field-hint">The agents' own prompts. Most people never need to change these: use the rules above instead. Each one is built in; customising makes a copy you can edit, and going back to built-in deletes your copy.</p>
+          ${advanced.map((r) => row(r)).join('')}</details>` : ''}
       </div>`;
     container.scrollTop = scroll;
   }
@@ -114,15 +129,16 @@ export function createSettingsView(container, deps) {
     return `<section class="settings-group"><h2>${esc(title)}</h2><p class="field-hint">${esc(hint)}</p>${list.map((r) => row(r)).join('')}</section>`;
   }
 
-  function personalSection(list) {
+  // Every connected wiki with its role (Personal, Team or View only). One of each at most: choosing a second
+  // Personal or Team makes the wiki that had it View only, and the host says which.
+  function wikisSection() {
     const folders = getFolders();
-    const chosen = getPersonal();
-    return `<section class="settings-group"><h2>Personal wiki</h2>
-      <p class="field-hint">The connected wiki that holds your own topics and session notes. Sessions, Review and Capture write only here.</p>
-      ${folders.length ? `<label class="settings-inline">Personal wiki
-        <select data-act="personal">${chosen ? '' : '<option value="" selected>Choose a wiki</option>'}${folders.map((f) => `<option value="${esc(f.alias)}" ${chosen?.alias === f.alias ? 'selected' : ''}>${esc(f.alias)}</option>`).join('')}</select>
-        ${chosen ? `<span class="session-faint">${esc(chosen.root)}</span>` : ''}</label>` : '<p class="ingest-empty">No wiki is connected yet.</p>'}
-      ${list.map((r) => row(r, 'These are your own rules for what gets captured into your personal wiki: what to pick out of a session or note, and what earns its own page.')).join('')}
+    return `<section class="settings-group"><h2>Wikis and their roles</h2>
+      <p class="field-hint">${esc(ROLE_HELP)}</p>
+      ${folders.length ? folders.map((f) => `<div class="settings-row"><div class="settings-row-main"><span class="settings-label">${esc(f.alias)}</span>${roleBadge(f.alias)}</div>
+        <div class="settings-path" title="${esc(f.root)}">${esc(f.root)}</div>
+        <label class="settings-inline">Role <select data-act="role" data-alias="${esc(f.alias)}">${['personal', 'team', 'view'].map((r) => `<option value="${r}" ${roleOf(f.alias) === r ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}</select></label>
+        ${roleOf(f.alias) === 'view' ? '<p class="field-hint">View only: to give this wiki a role, choose Personal or Team above.</p>' : ''}</div>`).join('') : '<p class="ingest-empty">No wiki is connected yet. Add a folder from the sidebar.</p>'}
     </section>`;
   }
 
@@ -141,12 +157,15 @@ export function createSettingsView(container, deps) {
     const state = stateOf(r);
     const [stateLabel, stateTip] = STATE_TEXT[state] || STATE_TEXT.ok;
     const isApp = r.name === 'app_folder';
-    const canOpen = r.exists && r.path && r.kind !== 'relative_folder';
+    const builtIn = r.status === 'built_in';
+    const canOpen = !builtIn && r.exists && r.path && r.kind !== 'relative_folder';
     const buttons = [
       r.kind !== 'relative_folder' ? `<button class="secondary-button" data-act="open" data-name="${esc(r.name)}" ${canOpen ? '' : 'disabled'} title="${canOpen ? 'Open it' : 'Nothing to open yet'}">Open</button>` : '',
       isApp ? `<button class="secondary-button" data-act="relocate" ${first?.from_env ? 'disabled' : ''} title="${first?.from_env ? 'WIKIAPP_DATA_DIR decides where this folder is' : 'Move it, or adopt a folder that is already somewhere else'}">Change location…</button>`
         : r.can_change ? `<button class="secondary-button" data-act="change" data-name="${esc(r.name)}">Change…</button>` : '',
-      r.can_reset ? `<button class="secondary-button" data-act="reset" data-name="${esc(r.name)}" title="Put back the text WikiApp ships. Your edits are replaced.">Reset to default</button>` : '',
+      builtIn || r.can_customise ? `<button class="secondary-button" data-act="customise" data-name="${esc(r.name)}" title="Make a copy of the built-in prompt that you can edit">Customise</button>` : '',
+      r.can_reset && isPrompt(r) ? `<button class="secondary-button" data-act="reset" data-name="${esc(r.name)}" title="Delete your copy and use the built-in prompt again">Back to built-in</button>`
+        : r.can_reset ? `<button class="secondary-button" data-act="reset" data-name="${esc(r.name)}" title="Put back the text WikiApp ships. Your edits are replaced.">Reset to default</button>` : '',
       r.can_clear && r.overridden ? `<button class="secondary-button" data-act="default" data-name="${esc(r.name)}" title="Forget the path set here">Clear</button>`
         : r.overridden ? `<button class="secondary-button" data-act="default" data-name="${esc(r.name)}" title="${esc(r.default || 'The default place')}">Back to default location</button>` : '',
       r.path && r.kind !== 'relative_folder' ? `<button class="link-button" data-act="copy" data-name="${esc(r.name)}" title="Copy the path">Copy path</button>` : '',
@@ -154,11 +173,11 @@ export function createSettingsView(container, deps) {
     return `<div class="settings-row${state === 'missing' ? ' missing' : ''}" data-name="${esc(r.name)}">
       <div class="settings-row-main">
         <span class="settings-label">${esc(r.label)}</span>
-        <span class="settings-state ${state === 'ok' ? 'ok' : state === 'missing' ? 'bad' : 'neutral'}" title="${esc(stateTip)}">${esc(stateLabel)}</span>
+        ${builtIn ? '' : `<span class="settings-state ${state === 'ok' ? 'ok' : state === 'missing' ? 'bad' : 'neutral'}" title="${esc(stateTip)}">${esc(stateLabel)}</span>`}
         ${statusLabel ? `<span class="ingest-kind ${r.status === 'customised_newer_default' ? 'new' : ''}" title="${esc(statusTip)}">${esc(statusLabel.toUpperCase())}</span>` : ''}
         ${r.overridden && !r.can_clear ? '<span class="ingest-kind" title="Pointed away from its default place">MOVED</span>' : ''}
       </div>
-      <div class="settings-path" title="${esc(r.path)}">${esc(r.path || '(not set)')}</div>
+      <div class="settings-path" title="${esc(r.path)}">${esc(builtIn ? 'The app\'s own version is in use.' : r.path || '(not set)')}</div>
       ${note ? `<p class="field-hint">${esc(note)}</p>` : ''}
       <div class="settings-buttons">${buttons}</div>
     </div>`;
@@ -195,9 +214,14 @@ export function createSettingsView(container, deps) {
     const lines = [];
     if (!c) lines.push('<p class="session-faint">The connection status could not be read.</p>');
     else {
-      lines.push(`<p><span class="settings-state ${c.ok ? 'ok' : 'bad'}">${c.ok ? 'set up' : 'not set up'}</span> ${esc(c.summary || '')}${c.method ? ` <span class="session-faint">(${esc(c.method)})</span>` : ''}</p>`);
-      for (const p of c.problems || []) lines.push(`<p class="field-error">${esc(p)}</p>`);
-      for (const n of c.notes || []) lines.push(`<p class="field-hint">${esc(n)}</p>`);
+      const clean = (t) => String(t ?? '').replace(/`/g, '').trim();
+      const summary = clean(c.summary);
+      const method = clean(c.method);
+      const showMethod = method && !summary.toLowerCase().includes(method.toLowerCase());
+      lines.push(`<p><span class="settings-state ${c.ok ? 'ok' : 'bad'}">${c.ok ? 'set up' : 'not set up'}</span> ${esc(summary)}${showMethod ? ` <span class="session-faint">(${esc(method)})</span>` : ''}</p>`);
+      for (const p of c.problems || []) lines.push(`<p class="field-error">${esc(clean(p))}</p>`);
+      // Developer-facing notes (function names, environment variables) stay out of sight until asked for.
+      if ((c.notes || []).length) lines.push(`<details class="settings-notes"><summary class="session-faint">Details</summary>${c.notes.map((n) => `<p class="field-hint">${esc(clean(n))}</p>`).join('')}</details>`);
       if (!c.ok && (c.setup_doc || c.setup_file)) lines.push(`<p class="field-hint">Setup guide: <code>${esc(c.setup_doc || c.setup_file)}</code>${c.setup_file && c.setup_doc ? `<br>Settings file: <code>${esc(c.setup_file)}</code>` : ''}</p>`);
       else if (c.setup_file) lines.push(`<p class="field-hint">Settings file: <code>${esc(c.setup_file)}</code></p>`);
     }
@@ -253,8 +277,13 @@ export function createSettingsView(container, deps) {
       }
       else if (act === 'change') changeDialog(byName(name));
       else if (act === 'relocate') relocateDialog();
-      else if (act === 'reset') {
-        if (!confirm(`Put back the text WikiApp ships for "${byName(name).label}"? Your edits to it are replaced.`)) return;
+      else if (act === 'customise') {
+        await call('customisePrompt', { name });
+        await afterChange([name]);
+        if (confirm('Your copy is made. Open it now?')) await openRow(byName(name));
+      } else if (act === 'reset') {
+        const r = byName(name);
+        if (!confirm(isPrompt(r) ? `Go back to the built-in "${r.label}"? Your copy of it is deleted.` : `Put back the text WikiApp ships for "${r.label}"? Your edits to it are replaced.`)) return;
         await call('resetPrompt', { name });
         await afterChange([name]);
       } else if (act === 'default') {
@@ -284,9 +313,13 @@ export function createSettingsView(container, deps) {
 
   function onChange_(e) {
     const t = e.target;
-    if (t.dataset.act === 'personal') {
-      setPersonal(t.value);
-      draw();
+    if (t.dataset.act === 'role') {
+      setRole(t.dataset.alias, t.value)
+        .then(({ demoted }) => {
+          if (demoted) toast(`${demoted} is now View only.`);
+          return onChanged(['roles']);
+        })
+        .catch((err) => toast(err.message));
     } else if (t.dataset.act === 'engine') {
       engineDraft.engine = t.value;
       draw();

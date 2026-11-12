@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -366,10 +367,12 @@ class FakeEngineTest(unittest.TestCase):
 
         class Wikis:
             aliases = ["team"]
+            roots = {"team": self.base / "team"}
 
             def rules_text(self, alias):
                 return "Team rules."
-        instructions = ingest_prompts.write_instructions(Wikis(), ingest_prompts.agent_prompt("team-wiki-manager"), TODAY)
+        with mock.patch.object(ingest_prompts.pathlist, "wiki_role_for_root", return_value="team"):   # the team wiki
+            instructions = ingest_prompts.write_instructions(Wikis(), ingest_prompts.agent_prompt("team-wiki-manager"), TODAY)
         first = ingest_prompts.pathlist.read_prompt("prompt.promotion-first-message", date=TODAY)
         self.assertIn("Team rules.", instructions)
         self.assertNotIn(RULES, instructions + first)

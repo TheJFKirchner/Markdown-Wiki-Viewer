@@ -25,11 +25,12 @@ def cmd_init(cfg, args):
 def cmd_status(cfg, args):
     """Whether the folder is set up as a personal wiki, and how much is in it."""
     root = cfg.personal
-    out = {"wiki": str(root), "exists": root.is_dir(), "type": None, "personal": False,
+    out = {"wiki": str(root), "exists": root.is_dir(), "type": None, "personal": False, "role": wiki.app_role(root),
            "topics": 0, "tags": 0, "folders": 0, "sessions": 0, "review_due": 0, "queue_pending": 0, "spend": {}}
     if (root / "WIKI.md").exists():
         out["type"] = wiki.read_page(root / "WIKI.md")[0].get("type") or None
-        out["personal"] = out["type"] == "personal"
+    out["personal"] = root.is_dir() and wiki.is_personal(root)
+    out["set_up"] = out["personal"] and (root / wiki.SESSIONS_DIR).is_dir() and (root / "index.md").is_file()
     if out["personal"]:
         wiki.upgrade_layout(root)  # a wiki from the first version: tags/ and session-notes/
         topics = review.list_topics(cfg)
@@ -49,13 +50,18 @@ def cmd_status(cfg, args):
 
 
 def cmd_list(cfg, args):
-    rows = ingest.list_sessions(cfg, args.days, include_done=args.all)
+    result = ingest.list_sessions(cfg, args.days, include_done=args.all, min_turns=args.min_turns)
     if args.json:
-        return _out(args, rows, "")
-    if not rows:
-        return print("Nothing waiting to be ingested.")
-    for r in rows:
-        print(f"{r['status']:<9} {r['date']}  {r['session_id'][:8]}  {r['user_messages']:>3} msgs  {r['title']}")
+        return _out(args, result, "")
+    hidden = (f"{result['hidden_count']} session(s) with fewer than {result['min_turns']} of your messages hidden."
+              if result["hidden_count"] else "")
+    if not result["sessions"]:
+        return print("\n".join(x for x in ("Nothing waiting to be ingested.", hidden) if x))
+    for r in result["sessions"]:
+        extra = f" +{r['subagents']} subagent(s)" if r["subagents"] else ""
+        print(f"{r['status']:<9} {r['name']:<48} {r['user_messages']:>3} msgs{extra}  {r['title']}")
+    if hidden:
+        print(hidden)
 
 
 def cmd_ingest(cfg, args):
@@ -186,7 +192,7 @@ def cmd_reindex(cfg, args):
 
 
 def cmd_condense(cfg, args):
-    print(transcripts.condense(transcripts.find_session(cfg, args.session_id), cfg.max_transcript_chars))
+    print(transcripts.condense(ingest.resolve_session(cfg, args.session_id), cfg.max_transcript_chars))
 
 
 def cmd_install(cfg, args):
@@ -238,10 +244,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("list", cmd_list, "sessions waiting to be ingested")
     sp.add_argument("--days", type=int, help="lookback window (default from config)")
     sp.add_argument("--all", action="store_true", help="include ingested and skipped sessions")
-    sp = add("ingest", cmd_ingest, "ingest one session")
+    sp.add_argument("--min-turns", type=int, help="hide sessions with fewer of your messages than this (0: hide none; "
+                                                  "default: WikiApp's Sessions filter, else config, else 3)")
+    sp = add("ingest", cmd_ingest, "ingest one session (by id or readable name)")
     sp.add_argument("session_id")
     sp.add_argument("--dry-run", action="store_true", help="show the extraction without writing anything")
-    sp.add_argument("--force", action="store_true", help="ingest even if the session is very short")
+    sp.add_argument("--force", action="store_true", help="accepted for older callers; a chosen session is always captured")
     sp.add_argument("--only-new", action="store_true", help="don't send a session again that was captured and hasn't changed since")
     sp = add("capture-note", cmd_capture_note, "capture one of your notes (a Markdown file) into the personal wiki")
     sp.add_argument("path")

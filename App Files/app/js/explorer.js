@@ -2,6 +2,7 @@
 // Folders first, then files, both sorted naturally ("Note 2" before "Note 10").
 
 import { isNotePath, isScriptPath, noteId } from './vault.js';
+import { roleOf, ROLE_LABEL } from './roles.js';
 
 const CHEVRON = '<svg class="chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>';
 const GEAR =
@@ -111,7 +112,10 @@ export function createExplorer(container, { onOpen, onEditFolder }) {
       const dirName = folder.root.split(/[\\/]/).pop();
       where.textContent = folder.error ? "can't be read" : dirName.toLowerCase() === folder.alias.toLowerCase() ? '' : dirName;
       if (folder.error) row.title = `${folder.root}\n${folder.error}`;
-      row.append(dot, name, where);
+      const role = document.createElement('span');
+      role.className = `role-badge role-${roleOf(folder.alias)}`;
+      role.textContent = ROLE_LABEL[roleOf(folder.alias)];
+      row.append(dot, name, role, where);
 
       const edit = document.createElement('button');
       edit.className = 'icon-button edit-folder';

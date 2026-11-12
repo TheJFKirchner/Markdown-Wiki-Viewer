@@ -313,7 +313,9 @@ class Host:
                 self.install_agentlib()  # in the background; an "agentlibInstalled" event follows
                 entry = {**entry, "installing": True}
             return entry
-        if cmd == "resetPrompt":
+        if cmd == "customisePrompt":  # an agent's prompt: make its editable copy in .wiki/prompts
+            return pathlist.customise_prompt(text(args, "name"))
+        if cmd == "resetPrompt":  # a note template: the shipped text back; an agent's prompt: delete the copy
             return pathlist.reset_prompt(text(args, "name"))
         if cmd == "readPathFile":  # a prompt or template slot, or a wiki's rules file...
             return pathlist.read_file(text(args, "name"))
@@ -328,6 +330,14 @@ class Host:
             return pathlist.set_engine_settings(args.get("settings"))
         if cmd == "setAgentModel":  # the same, for one agent: {agent, model}; model "" = the default
             return pathlist.set_agent_model(text(args, "agent"), args.get("model") or "")
+        if cmd == "getWikiRoles":  # {roles: {alias: personal|team|view}, needs_team, needs_personal}
+            return pathlist.wiki_roles(persist=True)
+        if cmd == "setWikiRole":  # {alias, role}: also demoted (the alias that lost the role, or null)
+            return pathlist.set_wiki_role(text(args, "alias"), text(args, "role"))
+        if cmd == "getSessionsFilter":  # {min_turns, options: [0, 3, 5, 10, 20]}
+            return pathlist.get_sessions_filter()
+        if cmd == "setSessionsFilter":  # {min_turns}
+            return pathlist.set_sessions_filter(args.get("min_turns"))
         if cmd == "connectionStatus":  # free: sends nothing
             return appfolder.connection_status()
         if cmd == "testConnection":  # ONE tiny real request (a fraction of a cent)
@@ -413,6 +423,7 @@ class Host:
             return self.sessions.status(text(args, "root"))
         if cmd == "sessionsSetup":
             return self.sessions.setup(text(args, "root"))
+        # {sessions: [rows with name, title, user_messages, subagents...], hidden_count, min_turns}
         if cmd == "sessionsList":  # Claude Code sessions not captured yet; takes a few seconds
             return self.sessions.list(text(args, "root"), args.get("days"), bool(args.get("all")))
         if cmd == "sessionsIngest":  # one request to Claude: 20 seconds to a couple of minutes
@@ -694,7 +705,8 @@ def main():
         return
     try:
         appfolder.startup()  # with a place chosen: the prompt and template copies, up to date
-    except OSError:
+        pathlist.wiki_roles(persist=True, upgrade=True)  # an older setup's personal (and team) wiki, kept as roles
+    except (OSError, pathlist.PathMissing):
         pass  # a read-only or unreachable folder: the app starts, and says so when it's needed
     webview.settings["OPEN_DEVTOOLS_IN_DEBUG"] = False
     if os.environ.get("WIKIAPP_DEBUG_PORT"):

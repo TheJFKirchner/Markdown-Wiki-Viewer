@@ -6,10 +6,11 @@ A tool is an ordinary function that the agent can ask us to run. Each tool below
   - the function itself, which runs here on this computer and returns text for the agent to read.
 
 No tool writes anything to the wikis.
-  read_page     returns a page's text.
+  read_page     returns a page's text (from any wiki in the run, view-only ones included).
   propose_page  checks a proposed change and, if it's sound, turns it into a card that the person
                 accepts or rejects in the app. A change that fails a check goes back to the agent
-                as an error message, so it can fix the change and try again.
+                as an error message, so it can fix the change and try again. Only the team wiki
+                (its role in Settings) can be changed: any other wiki is refused here, in code.
   ask_reviewer  (a promotion only) sends up to five questions to the app, and ends the agent's turn.
 
 The descriptions are part of what the agent sees: keep them in step with ingest/AGENT.md.
@@ -23,6 +24,7 @@ import yaml
 from agentlib import Tool
 
 from wikis import FRONTMATTER, NOTE_EXT, Wikis, links_in
+import pathlist  # noqa: E402  (on the path through wikis.py: each wiki's role)
 
 
 class ToolError(Exception):
@@ -36,7 +38,10 @@ class RunMemory:
         self.wikis = wikis
         self.run_id = run_id
         self.note_ids = note_ids           # the notes being ingested (for a promotion: the personal pages)
-        self.targets = targets or None     # the only wikis changes may be proposed in (a promotion: the team wikis)
+        self.targets = targets or None     # the only wikis changes may be proposed in (a promotion: the team wiki)
+        # Each wiki's role (Settings): changes are only ever proposed to the "team" wiki. A view-only
+        # (or personal) wiki can still be read with read_page, for context.
+        self.roles = {alias: pathlist.wiki_role_for_root(root) for alias, root in wikis.roots.items()}
         self.tell_app = tell_app           # sends a progress line to the app
         self.pages_read: dict[str, str] = {}   # page id -> its text when the agent read it
         self.cards: dict[str, dict] = {}       # page id (or "alias:new/path.md") -> the card for it
@@ -143,6 +148,10 @@ def propose_page(memory: RunMemory, wiki: str, summary: str, from_notes: list, p
     wiki = str(wiki or "").strip()
     if wiki not in memory.wikis.aliases:
         raise ToolError(f'Unknown wiki "{wiki}". Wikis: {", ".join(memory.wikis.aliases)}.')
+    if memory.roles.get(wiki) != "team":
+        teams = [a for a, r in memory.roles.items() if r == "team" and (not memory.targets or a in memory.targets)]
+        raise ToolError(pathlist.role_refusal(wiki, memory.roles.get(wiki), "team")
+                        + (f" Changes may only be proposed in: {', '.join(teams)}." if teams else ""))
     if memory.targets and wiki not in memory.targets:
         raise ToolError("Changes may only be proposed in: " + ", ".join(memory.targets) + f'. "{wiki}" is where the pages came from.')
     summary = str(summary or "").strip()

@@ -31,7 +31,7 @@ import pathlist
 from pathlist import PathMissing, Resolver
 
 APP_FILES = pathlist.APP_FILES
-LEFTOVERS_FILE = "leftovers.json"
+LEFTOVERS_FILE = pathlist.LEFTOVERS_FILE
 AGENT_IDS = list(pathlist.AGENT_SLOTS.values())
 OLD_SKILL_IDS = AGENT_IDS + pathlist.RETIRED_AGENTS   # every agent an older version made a skill of
 
@@ -71,9 +71,12 @@ def _old_data_folder(old: dict) -> tuple[Path | None, Path | None]:
 # ---- What setup would do ----------------------------------------------------------------------
 
 def preview(folder: Path) -> dict:
-    """What choosing `folder` would create, copy from an older version, or find already there.
-    Writes nothing. -> {"folder", "folder_exists", "items": [{name, label, path, action, source}]}
-    action: "create" (a shipped default), "copy" (from an older version), "found" (kept as it is)."""
+    """What choosing `folder` would really create, copy from an older version, or find already
+    there: the folder, settings, the capture rules, the note templates (and their folder), and
+    anything an older version left to copy. Agent prompts and internal files are read from the app
+    itself, so they aren't listed (unless an older version's edited prompt will be copied). Writes
+    nothing. -> {"folder", "folder_exists", "items": [{name, label, path, action, source}], ...}
+    action: "create" (made now, or a shipped default), "copy" (from an older version), "found"."""
     folder = Path(folder)
     resolver = Resolver(folder, pathlist.load_record(folder) if folder.is_dir() else None, workspace=[], use_env=False)
     old = old_locations()
@@ -84,6 +87,7 @@ def preview(folder: Path) -> dict:
         items.append({"name": name, "label": label, "path": str(target) if target else "", "action": action,
                       "source": str(source) if source else ""})
 
+    add("app_folder", "WikiApp's private folder", folder, "found" if folder.is_dir() else "create")
     for relative, name in OLD_DATA:
         target = resolver.path(name)
         source = data / relative if data else None
@@ -91,20 +95,27 @@ def preview(folder: Path) -> dict:
             add(name, _label(name), target, "found")
         elif source is not None and source.is_file():
             add(name, _label(name), target, "copy", source)
+        elif name == "settings":
+            add(name, _label(name), target, "create")
     runs_target = resolver.path("run_history")
     if runs is not None and runs.is_dir() and any(runs.iterdir()):
         add("run_history", _label("run_history"), runs_target, "found" if runs_target and runs_target.is_dir() else "copy", runs)
-    for name in pathlist.slot_names() + [row[0] for row in pathlist.USER_FILES]:
+    rules = resolver.path("personal_capture_rules")
+    old_rules = folder / pathlist.OLD_MOVES["personal_capture_rules"]
+    add("personal_capture_rules", _label("personal_capture_rules"), rules,
+        "found" if rules.exists() or old_rules.is_file() else "create", pathlist.shipped_file("personal_capture_rules"))
+    templates = resolver.path("note_templates")
+    add("note_templates", _label("note_templates"), templates, "found" if templates.is_dir() else "create")
+    for name, *_ in pathlist.MAIN_SLOTS:
         target = resolver.path(name)
-        if target is None or not pathlist._inside(target, folder):
-            continue
+        old_copy = folder / pathlist.OLD_MOVES[name]
+        add(name, _label(name), target, "found" if target.exists() or old_copy.is_file() else "create",
+            pathlist.shipped_file(name))
+    for name in pathlist.AGENT_SLOTS:
         skill = _old_skill(old, name)
-        if target.exists():
-            add(name, _label(name), target, "found")
-        elif skill is not None:
-            add(name, _label(name), target, "copy", skill)
-        else:
-            add(name, _label(name), target, "create", pathlist.shipped_file(name))
+        copy = resolver.copy_path(name)
+        if skill is not None and copy is not None and not copy.exists():
+            add(name, _label(name), copy, "copy", skill)
     old_index, inside = _old_wiki_index(folder)
     return {"folder": str(folder), "folder_exists": folder.is_dir(), "items": items,
             # The place is an older version's <wiki>/.wiki index folder, or inside a wiki: the page warns.
@@ -171,14 +182,20 @@ def _label(name: str) -> str:
     for row in pathlist.SLOTS + pathlist.USER_FILES:
         if row[0] == name:
             return row[1]
-    return name
+    return {"app_folder": "WikiApp's private folder"}.get(name, name)
 
 
 def _old_skill(old: dict, name: str) -> Path | None:
+    """An older version's copy of an agent's prompt in Claude Code's skills folder, if the person
+    edited it (an unedited one is the same as the app's own file, so there is nothing to bring over)."""
     if name not in pathlist.AGENT_SLOTS or not old.get("skills"):
         return None
     skill = Path(old["skills"]) / pathlist.AGENT_SLOTS[name] / "SKILL.md"
-    return skill if skill.is_file() else None
+    try:
+        edited = skill.is_file() and pathlist._normalise(skill.read_text(encoding="utf-8-sig")) != pathlist.shipped_text(name)
+    except (OSError, UnicodeDecodeError):
+        edited = False
+    return skill if edited else None
 
 
 # ---- Bringing over what older versions left (copies only) -----------------------------------------
@@ -203,12 +220,13 @@ def migrate(folder: Path) -> dict:
         for source in sorted(runs.rglob("*")):
             if source.is_file() and _copy_new(source, runs_target / source.relative_to(runs), folder):
                 copied.append(str(runs_target / source.relative_to(runs)))
-    # The agents' prompts. The person's edits come along, and count as their own (customised).
-    # (The retired note taker's prompt, and the old "Your notes" that belonged to it, stay behind.)
+    # The agents' prompts: an edited one comes along as the person's customised copy (advanced);
+    # an unedited one stays behind (the app reads its own file). (The retired note taker's prompt,
+    # and the old "Your notes" that belonged to it, stay behind too.)
     record_changed = False
     for name in pathlist.AGENT_SLOTS:
-        target = resolver.path(name)
-        if target is None or target.exists() or not pathlist._inside(target, folder):
+        target = resolver.copy_path(name)
+        if resolver.is_overridden(name) or target is None or target.exists() or not pathlist._inside(target, folder):
             continue
         skill = _old_skill(old, name)
         if skill is None:
@@ -334,12 +352,26 @@ def choose_location(chosen: str) -> dict:
     if error:
         raise (PathMissing if folder is not None and not folder.parent.is_dir() else ValueError)(error)
     folder.mkdir(exist_ok=True)
+    had_list = (folder / LEFTOVERS_FILE).exists()   # an adopted folder's own list is kept as it is
     copied = migrate(folder)["copied"]
-    created = pathlist.sync_slots(folder)
-    if not (folder / LEFTOVERS_FILE).exists():
-        pathlist.write_text_atomic(folder / LEFTOVERS_FILE, json.dumps(find_leftovers(folder), indent=1, ensure_ascii=False) + "\n")
+    created = pathlist.sync_slots(folder)           # may list an older layout's edited copies
+    if not had_list:
+        listed = created.get("leftovers") or []
+        pathlist.write_text_atomic(folder / LEFTOVERS_FILE,
+                                   json.dumps(find_leftovers(folder) + listed, indent=1, ensure_ascii=False) + "\n")
     _write_pointer(folder)
+    _settle_roles()
     return {**first_run_state(), "copied": copied, "created": created["created"]}
+
+
+def _settle_roles() -> None:
+    """Saves the wiki roles once a private folder is chosen or adopted: an older installation's
+    settings (migrated or already there) give its roles; a fresh folder saves none, so every wiki
+    opened from then on starts as view only (pathlist.wiki_roles)."""
+    try:
+        pathlist.wiki_roles(persist=True, upgrade=True)
+    except (OSError, PathMissing):
+        pass
 
 
 def relocate(new_path: str, mode: str) -> dict:
@@ -361,6 +393,7 @@ def relocate(new_path: str, mode: str) -> dict:
             raise PathMissing(f"There's no {pathlist.FOLDER_NAME} folder at {target.parent} to adopt.")
         pathlist.sync_slots(target)
         _write_pointer(target)
+        _settle_roles()
     else:
         current = pathlist.require_app_folder()
         if pathlist._inside(target, current):

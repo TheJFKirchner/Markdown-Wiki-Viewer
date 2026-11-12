@@ -65,7 +65,8 @@ class PipelineTest(unittest.TestCase):
         self.wiki = base / "personal"
         self.transcript = base / "projects" / "C--work-claims" / f"{SID}.jsonl"
         write_transcript(self.transcript)
-        self.cfg = config.Config({"personal_wiki": str(self.wiki), "transcripts_dir": str(base / "projects")}, None)
+        # min_turns 0: these two-message sessions are listed (the filter has tests of its own)
+        self.cfg = config.Config({"personal_wiki": str(self.wiki), "transcripts_dir": str(base / "projects"), "min_turns": 0}, None)
         wiki.init_personal(self.wiki, "---\ntype: personal\n---\n")
 
     def tearDown(self):
@@ -75,6 +76,9 @@ class PipelineTest(unittest.TestCase):
             if value is not None:
                 os.environ[key] = value
         self.tmp.cleanup()
+
+    def listed(self, **kw):
+        return ingest.list_sessions(self.cfg, **kw)["sessions"]
 
     def ingest(self, data, sid=SID, **kw):
         with mock.patch.object(llm, "call_json", return_value=data) as m:
@@ -114,7 +118,7 @@ class PipelineTest(unittest.TestCase):
         write_transcript(self.transcript.with_name("22222222-0000-0000-0000-000000000000.jsonl"), entrypoint="sdk-py")
         p = self.transcript.with_name("99999999-0000-0000-0000-000000000000.jsonl")
         p.write_text(_line(type="user", message={"role": "user", "content": transcripts.SENTINEL + "\nprompt"}) + "\n", encoding="utf-8")
-        self.assertEqual([r["session_id"] for r in ingest.list_sessions(self.cfg)], [SID])
+        self.assertEqual([r["session_id"] for r in self.listed()], [SID])
 
     # ---- capture ----
 
@@ -135,8 +139,8 @@ class PipelineTest(unittest.TestCase):
         self.assertIn(f"Chose CLAIMSDB as the source ([[{note.stem}]])", page.read_text(encoding="utf-8"))
         self.assertIn("[[denial-analysis]] — Denial rates by plan · #denials #claims", (self.wiki / "index.md").read_text(encoding="utf-8"))   # tags are the kind
         self.assertIn("- [ ] 2026-11-03 · **CCW claims**", (self.wiki / "promotion-queue.md").read_text(encoding="utf-8"))
-        self.assertEqual(ingest.list_sessions(self.cfg), [])
-        self.assertEqual(ingest.list_sessions(self.cfg, include_done=True)[0]["status"], "ingested")
+        self.assertEqual(self.listed(), [])
+        self.assertEqual(self.listed(include_done=True)[0]["status"], "ingested")
         # The next capture is shown the topic and the tags, so it can reuse them.
         self.more_sessions(["another"])
         self.assertIn("- [[denial-analysis]]", self.prompt)
@@ -223,24 +227,28 @@ class PipelineTest(unittest.TestCase):
         self.ingest(extraction())
         t = self.transcript.stat().st_mtime + 60
         os.utime(self.transcript, (t, t))
-        self.assertEqual(ingest.list_sessions(self.cfg)[0]["status"], "updated")
+        self.assertEqual(self.listed()[0]["status"], "updated")
 
     def test_not_worth_recording_is_skipped(self):
         result = self.ingest(extraction(worth_recording=False, skip_reason="Just a lookup"))
         self.assertEqual(result["status"], "skipped")
         self.assertEqual(wiki.session_notes(self.wiki), [])
-        self.assertEqual(ingest.list_sessions(self.cfg), [])
+        self.assertEqual(self.listed(), [])
 
     def test_dry_run_writes_nothing(self):
         result = self.ingest(extraction(), dry_run=True)
         self.assertEqual(result["status"], "dry-run")
         self.assertIsNone(self.topic())
-        self.assertEqual(ingest.list_sessions(self.cfg)[0]["status"], "new")
+        self.assertEqual(self.listed()[0]["status"], "new")
 
-    def test_short_session_skipped_by_rule(self):
-        self.cfg.min_user_messages = 5
-        self.assertEqual(self.ingest(extraction())["status"], "skipped")
-        self.assertEqual(self.ingest(extraction(), force=True)["status"], "ingested")
+    def test_short_session_is_hidden_from_the_list_but_can_still_be_captured(self):
+        # The minimum-turns filter replaced the old skip-by-rule: a short session is left out of the
+        # list (so "ingest all", which works through the list, skips it), but captured when chosen.
+        self.cfg.min_turns = 5
+        result = ingest.list_sessions(self.cfg)
+        self.assertEqual((result["sessions"], result["hidden_count"], result["min_turns"]), ([], 1, 5))
+        self.assertEqual(ingest.list_sessions(self.cfg, min_turns=0)["hidden_count"], 0)
+        self.assertEqual(self.ingest(extraction())["status"], "ingested")   # chosen explicitly: no force needed
 
     def test_refuses_to_write_to_a_team_wiki(self):
         (self.wiki / "WIKI.md").write_text("---\ntype: team\n---\n", encoding="utf-8")

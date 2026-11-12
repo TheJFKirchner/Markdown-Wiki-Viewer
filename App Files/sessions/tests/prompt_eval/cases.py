@@ -65,13 +65,16 @@ TEAM_RULES = ("# Team wiki rules\n\n- One page per product or metric. Pages star
 
 # ---- transcripts ---------------------------------------------------------------------------------
 
-def _line(sid, cwd, kind, ts, content):
+def _line(sid, cwd, kind, ts, content, **extra):
     return json.dumps({"sessionId": sid, "cwd": cwd, "isSidechain": False, "entrypoint": "cli", "type": kind,
-                       "timestamp": ts, "message": {"role": kind, "content": content}})
+                       "timestamp": ts, "message": {"role": kind, "content": content}, **extra})
 
 
 def transcript(sid: str, cwd: str, day: str, turns: list, title: str) -> str:
-    """turns: ("user", text) | ("assistant", text, [tool uses]) | ("result", tool id, text)."""
+    """turns: ("user", text) | ("assistant", text, [tool uses]) | ("result", tool id, text) |
+    ("launched", tool id): a subagent started in the background (its report comes later) |
+    ("notify", tool id, summary, report): that report, as Claude Code delivers it.
+    An Agent tool use answered by ("result", ...) is a subagent that reported in the foreground."""
     out = []
     for i, turn in enumerate(turns):
         ts = f"{day}T10:{i:02d}:00Z"
@@ -82,6 +85,13 @@ def transcript(sid: str, cwd: str, day: str, turns: list, title: str) -> str:
             for j, (name, inp) in enumerate(turn[2] if len(turn) > 2 else []):
                 content.append({"type": "tool_use", "id": f"t{i}-{j}", "name": name, "input": inp})
             out.append(_line(sid, cwd, "assistant", ts, content))
+        elif turn[0] == "launched":
+            out.append(_line(sid, cwd, "user", ts, [{"type": "tool_result", "tool_use_id": turn[1], "content": "Async agent launched successfully."}],
+                             toolUseResult={"status": "async_launched", "isAsync": True, "agentId": f"a{i}"}))
+        elif turn[0] == "notify":
+            text = (f"<task-notification>\n<task-id>b{i}</task-id>\n<tool-use-id>{turn[1]}</tool-use-id>\n<status>completed</status>\n"
+                    f"<summary>{turn[2]}</summary>\n<result>{turn[3]}</result>\n</task-notification>")
+            out.append(_line(sid, cwd, "user", ts, text, origin={"kind": "task-notification"}))
         else:
             out.append(_line(sid, cwd, "user", ts, [{"type": "tool_result", "tool_use_id": turn[1], "content": turn[2]}]))
     out.append(json.dumps({"type": "custom-title", "customTitle": title, "sessionId": sid}))
@@ -166,6 +176,43 @@ SESSIONS["todo-talk"] = ("f6a7b8c9-6666-4fff-8aaa-000000000006", "C:\\work\\anal
     ("assistant", "Understood. Want me to draft the summary?"),
     ("user", "No, I'll write it myself."),
 ], "Churn test-account check")
+
+# Subagents: the assistant hands work to a helper, whose report comes back into the session. A
+# report is the assistant's side: captured only when the analyst confirms it.
+SESSIONS["subagent-confirmed"] = ("a7b8c9d0-7777-4aaa-8bbb-000000000007", "C:\\work\\analytics\\renewals", "2026-11-11", [
+    ("user", "The CRM export and the billing table disagree on active subscriptions. Find out why."),
+    ("assistant", "I'll have a helper compare the two sources.",
+     [("Agent", {"description": "Compare CRM and billing", "subagent_type": "general-purpose",
+                 "prompt": "Compare active subscriptions in the CRM export with the billing table and explain the gap."})]),
+    ("result", "t1-0", "The billing table leaves out accounts still in their free trial, while the CRM export includes them. "
+                       "That accounts for the whole gap: 1,212 trial accounts."),
+    ("assistant", "The helper found that billing leaves out free-trial accounts and the CRM export includes them. Is that the explanation?"),
+    ("user", "Yes, confirmed - billing excludes free-trial accounts. That's the difference."),
+], "CRM vs billing subscriptions")
+
+SESSIONS["subagent-ignored"] = ("b8c9d0e1-8888-4bbb-8ccc-000000000008", "C:\\work\\analytics\\sellthrough", "2026-11-11", [
+    ("user", "Set up the weekly sell-through report for the camping range. For the record, we report sell-through weekly, Monday to Sunday."),
+    ("assistant", "Noted: weekly, Monday to Sunday. I'll have a helper check the source table in the background while I draft the query.",
+     [("Agent", {"description": "Audit store_sales table", "subagent_type": "Explore", "run_in_background": True,
+                 "prompt": "Check the store_sales table for data problems in October."})]),
+    ("launched", "t1-0"),
+    ("assistant", "Drafting the sell-through query now.", [("Write", {"file_path": "C:\\work\\analytics\\sellthrough\\sellthrough.sql", "content": "select ..."})]),
+    ("notify", "t1-0", 'Agent "Audit store_sales table" completed',
+     "store_sales double-counts returns in October, so the October total is overstated by about 4.2%."),
+    ("assistant", "The helper reports that store_sales double-counts returns in October, overstating the total by about 4.2%. The query is in sellthrough.sql."),
+    ("user", "Thanks, that's enough for today."),
+], "Sell-through report setup")
+
+SESSIONS["subagent-instructions"] = ("c9d0e1f2-9999-4ccc-8ddd-000000000009", "C:\\work\\analytics\\margins", "2026-11-12", [
+    ("user", "I need the gross margin by product line for the quarterly review. Margin is always net of returns, by the way."),
+    ("assistant", "Understood, net of returns. I'll ask a helper to build the margin table.",
+     [("Agent", {"description": "Build margin table", "subagent_type": "general-purpose",
+                 "prompt": "Build gross margin by product line. The fiscal year starts in April, and wholesale accounts are excluded "
+                           "from all margin figures. Margin is net of returns."})]),
+    ("result", "t1-0", "Built the margin table by product line in margin_by_line.sql, net of returns, for the last quarter."),
+    ("assistant", "The margin table is ready in margin_by_line.sql."),
+    ("user", "Great, thanks."),
+], "Margin by product line")
 
 # ---- notes ---------------------------------------------------------------------------------------
 
@@ -432,6 +479,32 @@ CASES = [
          ("keeps the stated rule (test accounts excluded)", present("test account")),
          ("the analyst's to-dos are not captured (summary by Friday / rerun backfill)",
           note_task_not_copied("friday", "backfill", "send the churn summary", "draft")),
+         *CAPTURE_COMMON]},
+    {"id": "S1", "kind": "session", "source": "subagent-confirmed",
+     "tempts": "a subagent's finding, relayed by the assistant and confirmed by the analyst",
+     "expect": [
+         ("worth recording", worth(True)),
+         ("captures the confirmed subagent finding (free trials)", present("trial")),
+         ("leaves out the subagent's figure the analyst never confirmed (1,212)", absent("1,212", "1212")),
+         *CAPTURE_COMMON]},
+    {"id": "S2", "kind": "session", "source": "subagent-ignored",
+     "tempts": "a background subagent reports a data problem the analyst never acknowledges",
+     "expect": [
+         ("worth recording (the analyst stated the reporting week)", worth(True)),
+         ("keeps the analyst's own statement (weekly, Monday to Sunday)", present("monday", "weekly")),
+         ("leaves out the unacknowledged subagent finding (double-counted returns / 4.2%)",
+          absent("double", "4.2", "overstat")),
+         ("no data finding from the subagent", lambda r: (not any("store_sales" in _blob(f) or "return" in _blob(f)
+                                                                   for f in _ext(r).get("data_findings") or []),
+                                                          f"data_findings={_ext(r).get('data_findings')}")),
+         *CAPTURE_COMMON]},
+    {"id": "S3", "kind": "session", "source": "subagent-instructions",
+     "tempts": "the assistant's instructions to a subagent state facts the analyst never said",
+     "expect": [
+         ("worth recording (the analyst stated margin is net of returns)", worth(True)),
+         ("keeps the analyst's statement (net of returns)", present("net of returns", "returns")),
+         ("the assistant's instructions are not captured as the analyst's (April fiscal year / wholesale excluded)",
+          absent("april", "fiscal", "wholesale")),
          *CAPTURE_COMMON]},
     {"id": "N2", "kind": "note", "source": "holdout-method",
      "tempts": "a method for every customer, written while working for one client",

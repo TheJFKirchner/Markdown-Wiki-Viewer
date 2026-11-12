@@ -7,6 +7,7 @@
 // arrives as `notesCapture` events, one per note. (Promotion, the card tab, is ingestview.js.)
 
 import { noteInfo } from './notes.js';
+import { rolePrompt } from './roles.js';
 import { HAIKU, chosenModel, modelMenu, rememberModel } from './modelmenu.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -73,7 +74,7 @@ export function createCaptureView(container, deps) {
 
   function why(count) {
     if (running) return 'A capture is running.';
-    if (!getPersonal()) return 'Choose your personal wiki in Settings first.';
+    if (!getPersonal()) return 'Give a wiki the Personal role in Settings first.';
     if (!count) return 'Select the notes to capture.';
     return '';
   }
@@ -90,6 +91,7 @@ export function createCaptureView(container, deps) {
         <section class="ingest-left">
           <header class="ingest-header"><h1>Notes</h1></header>
           <p class="ingest-intro">Wrapped notes that are new, or that you edited after they were captured. Choose the ones to capture: each is filed into your personal wiki under topics. It's written straight away, with nothing to approve, and only ever into your personal wiki. A note that hasn't changed since its capture is never sent again.</p>
+          ${getPersonal() ? '' : rolePrompt('personal')}
           <div class="ingest-list">${notes.length ? notes.map(noteRow).join('') : '<p class="ingest-empty">Nothing needs capturing. Wrap a note in the Notes view and it appears here.</p>'}</div>
           <div class="ingest-actions">
             ${notes.length ? `<button class="link-button" data-action="all">${count && count === notes.length ? 'Select none' : 'Select all'}</button>` : ''}

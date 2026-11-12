@@ -4,13 +4,13 @@ This file is the contract for what the agent behind the Promotion tab receives. 
 
 **The agent runs through agentlib**, the shared library that maps agent features to engine-neutral functions (`General-Purpose-Productivity/agentlib`, installed by `setup.py`). Nothing in the app imports an agent SDK itself. The engine is the one the engine settings name (`pathlist.get_engine_settings()`, `engine.json` in the private folder), `claude` by default, so the same code will run on another engine when agentlib has one.
 
-**One agent runs through this code: the team wiki manager, for Promotion runs only.** It reads personal pages chosen in the Promotion tab and proposes changes to the team wikis, as cards a person accepts or rejects. Its prompt is the `prompt.team-wiki-manager` slot. A job's `agent` is `"team-wiki-manager"` or absent; any other value, or a job with no `targets`, stops before anything is sent.
+**One agent runs through this code: the team wiki manager, for Promotion runs only.** It reads personal pages chosen in the Promotion tab and proposes changes to the team wiki (the one wiki whose role is `team` in Settings), as cards a person accepts or rejects. Its prompt is the `prompt.team-wiki-manager` slot. A job's `agent` is `"team-wiki-manager"` or absent; any other value, a job with no `targets`, or a target that isn't the team wiki (`agent.target_refusal`: "Northwind is view only; choose a team wiki in Settings."), stops before anything is sent.
 
 The app used to run a second agent here, the note taker, which turned quick notes into proposed page cards (the Notes tab). That flow is gone: notes now reach the personal wiki through the Sessions tab (`sessions/`). The other agents, the executive assistant and the wiki reviewer, don't run through this code either.
 
 **What reaches the model on each request, in this order:**
 1. **Tool definitions:** `read_page`, `propose_page` and `ask_reviewer`; nothing else ([§3](#3-tools)).
-2. **System prompt:** on Claude, two short lines Claude Code always adds, then the body of the agent's prompt file, then each wiki's rules ([§1](#1-system-prompt)).
+2. **System prompt:** on Claude, two short lines Claude Code always adds, then the body of the agent's prompt file, then each wiki's role and the team wiki's rules ([§1](#1-system-prompt)).
 3. **First user message:** on Claude, a short context reminder from Claude Code, then date, indexes and the personal pages ([§2](#2-first-user-message)).
 4. **The conversation so far:** the agent's tool calls and our tool results.
 
@@ -35,7 +35,7 @@ The app used to run a second agent here, the note taker, which turned quick note
 3. **One block per open wiki,** in workspace order:
 
    ```
-   ### Wiki "team"
+   ### Wiki "team" (the team wiki: the only wiki you propose changes to)
 
    <rules>
    ...the full text of the wiki's rules file (where the path list's wiki.team.rules says; team/wiki_rules.md by default), frontmatter included...
@@ -44,7 +44,9 @@ The app used to run a second agent here, the note taker, which turned quick note
 
    A wiki without a rules file gets `<rules>No rules file. Follow the existing pages' style.</rules>`.
 
-Nothing else goes in. There are no `{{user_notes}}` or `{{wikis}}` placeholders: the code appends the Wikis section itself, so an edited prompt can't lose it. The Wikis section has a block for every open wiki, the personal wiki included.
+   The heading names the wiki's role (Settings; `pathlist.wiki_roles`), from `ROLE_NOTES` in `prompts.py`: `(the team wiki: the only wiki you propose changes to)`, `(the personal wiki: where the pages come from; read only)` or `(view only: read it for context; never propose changes or new pages for it)`. A wiki whose role can't be found is shown as view only.
+
+Nothing else goes in. There are no `{{user_notes}}` or `{{wikis}}` placeholders: the code appends the Wikis section itself, so an edited prompt can't lose it. The Wikis section has a heading for every open wiki, the personal wiki included, but only the team wiki's heading is followed by its `<rules>` block: the personal wiki's rules are the capture rules (never sent to Promotion), and a view-only wiki's rules file is not used. Every other wiki is the heading line alone, for example `### Wiki "Northwind" (view only: read it for context; never propose changes or new pages for it)`.
 
 `agent.py` writes the finished text to `system.md` in the run folder and passes that file's text as the agent's `instructions`. In agentlib's lean setup the instructions are the whole system prompt; a long one (over about 30,000 characters) goes to Claude Code through a temporary file, so the Windows command-line limit doesn't apply.
 
@@ -150,6 +152,7 @@ The exact JSON is `PROPOSE_PAGE["inputs"]` in `tools.py`.
 
 **Checks in `tools.py`.** Each failure goes back as an error the agent can fix:
 - `wiki` is an open wiki.
+- **`wiki` is the team wiki** (its role in Settings, read when the run's tools are made). Any other wiki, view-only or personal, comes back as the role refusal, for example `Northwind is view only; choose a team wiki in Settings. Changes may only be proposed in: team.` `read_page` is not limited: the agent may read pages in any open wiki, view-only ones included.
 - **`wiki` is one of the job's `targets`.** The Promotion tab sets `targets` to the alias of every open wiki except the personal one (a job without `targets` doesn't start). A proposal anywhere else comes back as `Changes may only be proposed in: team. "personal" is where the pages came from.` `read_page` is not limited: the agent may read pages in any open wiki.
 - `summary` isn't empty.
 - `from_notes` isn't empty and lists only the personal pages sent in this run.
@@ -326,7 +329,7 @@ Revise each of those proposals to follow its feedback: call propose_page again f
 
 - **After five minutes:** we assume the 5-minute cache (a set assumption, not tested). Feedback sent more than five minutes after the last request re-caches the conversation once, which costs the conversation's size at $2.50 per million tokens (a few cents at most on runs this size).
 - **The agent's prompt and wiki rules:** a feedback round passes the run's own `system.md`, written when the run started, and doesn't rebuild it. Edits to an agent's prompt or a wiki's rules after a run only reach the next run, which also keeps the cache intact.
-- **The `targets` check** still applies to revised proposals: a feedback round reads the job's `targets` again.
+- **The `targets` and role checks** still apply to revised proposals: a feedback round reads the job's `targets` and the wikis' roles again.
 
 **Each run leaves a Claude Code session file** under `~/.claude/projects/` (a folder named after the run folder). Resuming needs it; if it is gone, the round stops with "This run's Claude conversation can't be found any more" (agentlib's `ConversationMissing`).
 

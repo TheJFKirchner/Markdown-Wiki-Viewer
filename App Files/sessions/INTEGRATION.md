@@ -26,8 +26,8 @@ Add `--personal <folder>` to name the personal wiki on the command line. With it
 |---|---|---|
 | `init` | Create the personal wiki's skeleton | No |
 | `status` | Whether the folder is set up, and what it holds | No |
-| `list [--days N] [--all]` | Sessions waiting to be ingested | No |
-| `ingest <session_id> [--dry-run] [--force] [--only-new]` | Capture one session. `--only-new` (what WikiApp passes): a session already captured and unchanged since returns `status: "unchanged"` without a model call | Yes |
+| `list [--days N] [--all] [--min-turns N]` | Sessions waiting to be ingested, short ones hidden | No |
+| `ingest <session_id or name> [--dry-run] [--force] [--only-new]` | Capture one session (by id, id prefix or readable name). `--only-new` (what WikiApp passes): a session already captured and unchanged since returns `status: "unchanged"` without a model call | Yes |
 | `capture-note <path> [--dry-run] [--force]` | Capture one of your notes into the personal wiki (see "Notes" below) | Yes, unless the note is unchanged since its capture |
 | `notes-status <path>...` | Whether each note is `new`, `changed` since its capture, or `captured` | No |
 | `conflicts` | Conflicts between your notes and sessions, waiting to be settled | No |
@@ -48,8 +48,7 @@ Add `--personal <folder>` to name the personal wiki on the command line. With it
 
 | Path | What it is |
 |---|---|
-| `WIKI.md` | Marks the folder as a personal wiki (`type: personal`) |
-| `wiki_rules.md` | Optional rules for the agents that work in this wiki |
+| `WIKI.md` | Marks the folder as a personal wiki (`type: personal`) for the command line on its own. In WikiApp the wiki's role decides (see "Choosing the personal wiki") and this file isn't needed |
 | `index.md` | One line per topic, grouped by folder, regenerated from the topic pages |
 | `promotion-queue.md` | Data findings waiting to be promoted to the team wiki |
 | `<topic>.md` | A topic: a page about one piece of work (`type: topic`), at the top level |
@@ -73,6 +72,8 @@ The tool's own progress (the ledger of what was captured or skipped, `spend.json
  "exists": true,
  "type": "personal",
  "personal": true,
+ "role": "personal",
+ "set_up": true,
  "topics": 12,
  "tags": 5,
  "folders": 2,
@@ -86,7 +87,9 @@ The tool's own progress (the ledger of what was captured or skipped, `spend.json
 |---|---|
 | `exists` | The folder is there |
 | `type` | Whatever its `WIKI.md` says, or null without one |
-| `personal` | True once `WIKI.md` says `type: personal`. The counts below are 0 until then |
+| `role` | Its role in WikiApp (`personal`, `team`, `view`), or null when it isn't one of WikiApp's open wikis (or there is no WikiApp private folder) |
+| `personal` | True when writes are allowed: its role is `personal`, or (with no role) its `WIKI.md` says `type: personal`. The counts below are 0 until then |
+| `set_up` | `personal`, and `Sessions/` and `index.md` exist (`init` has run). Offer **Set up** while this is false |
 | `topics` | Topic pages |
 | `tags` | Different tags in use on the topics |
 | `folders` | Tags that have become folders (hub pages) |
@@ -104,31 +107,41 @@ python sb.py list --json
 
 Returns the Claude Code sessions touched in the last 14 days that still need a decision, newest first. `--days N` changes the window; `--all` also returns sessions already ingested or skipped.
 
-Some sessions are never listed, whatever the options: sessions started through the Agent SDK (an `entrypoint` starting with `sdk`, WikiApp's own Notes and Promotion runs among them), this tool's own model calls, and sessions with no user message. Subagents' transcripts are never read.
+Some sessions are never listed, whatever the options: sessions started through the Agent SDK (an `entrypoint` starting with `sdk`, WikiApp's own Notes and Promotion runs among them), this tool's own model calls, and sessions with no user message. A subagent's transcript is never listed: its work is part of the session that started it (see "Subagents" below).
+
+**The minimum-turns filter.** A session with fewer of the user's own messages than `min_turns` is left out of `sessions` and only counted in `hidden_count`, so an "ingest all" that works through the list skips it. With WikiApp's private folder, `min_turns` is exactly what the app shows (`pathlist.get_sessions_filter`: 0 = off, 3, 5, 10 or 20; the stored filter, else 3), and `config.json` isn't consulted. On the command line on its own it is `config.json`'s `min_turns`, else its older `min_user_messages`, else 3. `--min-turns N` overrides all of them. A session named to `ingest` is captured however few turns it has (`--force` is no longer needed, and changes nothing).
 
 ```json
-[
- {
-  "session_id": "3a34ea9c-de41-4754-8183-89ee69321539",
-  "title": "Second brain wiki structure",
-  "date": "2026-11-10",
-  "last_active": "2026-11-10",
-  "project": "C:\\work\\claims-trend",
-  "entrypoint": "claude-desktop",
-  "user_messages": 7,
-  "first_prompt": "So I have a second brain wiki on my work computer...",
-  "status": "new"
- }
-]
+{
+ "sessions": [
+  {
+   "session_id": "aaaaaaaa-1111-2222-3333-444444444444",
+   "name": "2026-11-10-churn-dashboard-refresh",
+   "title": "Churn dashboard refresh",
+   "date": "2026-11-10",
+   "last_active": "2026-11-10",
+   "project": "C:\\work\\analytics\\renewals",
+   "entrypoint": "claude-desktop",
+   "user_messages": 7,
+   "subagents": 2,
+   "first_prompt": "The churn dashboard is showing last month twice...",
+   "status": "new"
+  }
+ ],
+ "hidden_count": 4,
+ "min_turns": 3
+}
 ```
 
 | Field | Use |
 |---|---|
-| `session_id` | Pass this to `ingest` and `skip` |
-| `title` | The session's name in Claude Code, or the start of its first message |
+| `session_id` | The hidden reference: pass this (or `name`) to `ingest` and `skip` |
+| `name` | The session's readable name, `<date>-<a few words>`: show this instead of the id. See "Readable names" below |
+| `title` | The session's name in Claude Code (the one the user gave it, else the one Claude Code generated), or the start of its first message |
 | `date`, `last_active` | When the session started and was last used |
 | `project` | The folder the session ran in |
-| `user_messages` | How many messages the user sent: a quick sign of how substantial it is |
+| `user_messages` | How many messages the user typed: a quick sign of how substantial it is. Subagent reports, background-task notifications and messages from other sessions never count |
+| `subagents` | How many subagents the session started (Agent or Task calls). Their work is folded into this session |
 | `entrypoint` | How the session was started, for example `claude-desktop`. Never a value starting with `sdk`: those sessions are left out by the tool |
 | `status` | See below |
 | `note` | Present once ingested: the session note's path inside the personal wiki |
@@ -143,6 +156,16 @@ Some sessions are never listed, whatever the options: sessions started through t
 
 Listing reads every recent transcript, so it takes a second or two on a machine with many sessions. Call it when the page opens and after each ingest, not on a timer.
 
+**Readable names.** Each listed session is given a name, `<date>-<a few words>` (`2026-11-12-churn-dashboard-fix`): the session's start date and up to five words from Claude Code's title for it (a `custom-title` line, else the generated `ai-title` line; the last of each counts), else from the user's first message. No model is asked. A short piece of the session id (4 characters, then 8, then all) is added only when the name is already taken. The name is kept in the session's ledger entry the first time it is given, so it never changes, even if the session is renamed in Claude Code or captured. `ingest`, `skip` and `condense` accept it in place of the id. The session id stays in the ledger and in the record's frontmatter as the hidden reference.
+
+**Subagents.** How Claude Code keeps them: the main assistant starts one with an `Agent` (formerly `Task`) tool call (`description`, `prompt`, `subagent_type`, `run_in_background`). A subagent that runs in the foreground answers that call with its report (the user line's `toolUseResult.status` is `completed`). One that runs in the background answers at once with `status: "async_launched"`, and its report arrives later as a user line the person never typed: `origin.kind` is `task-notification`, the text a `<task-notification>` block with `<tool-use-id>`, `<status>`, `<summary>` and `<result>`. Its own transcript is `<project>/<session id>/subagents/agent-<agent id>.jsonl`, with `agent-<agent id>.meta.json` naming the call (`toolUseId`). In the condensed transcript (`condense`, and what capture sends):
+
+- each subagent's report appears where it reached the session, under `## ASSISTANT (subagent)`, as `SUBAGENT "<description>" reported: ...`, followed by up to 8 of its steps as one-liners from its own transcript (cut first when the transcript is too long); a report is cut at 6,000 characters, and numbers of six or more digits in it become `#`;
+- a subagent whose report never arrived (still running, stopped) is shown with its own transcript's last message, marked as such;
+- the assistant's instructions to a subagent (and its messages to a running one, `SendMessage`) appear inside the assistant's message, masked like a command, as `(the assistant's instructions to SUBAGENT "<description>": ...)`;
+- none of it is ever labelled `USER`; a background shell command's notification keeps only its masked one-line summary (its output is tool output);
+- the capture rule is unchanged: the executive assistant treats subagent material as the assistant's, so a subagent's finding is captured only when the user confirmed it in the conversation.
+
 ### 2. Ingest one
 
 ```
@@ -153,21 +176,23 @@ This is the slow call: one Haiku request, typically 20 to 40 seconds. Run it in 
 
 ```json
 {
- "session_id": "3a34ea9c-de41-4754-8183-89ee69321539",
- "title": "Design and build personal wiki capture system",
+ "session_id": "aaaaaaaa-1111-2222-3333-444444444444",
+ "name": "2026-11-10-churn-dashboard-refresh",
+ "title": "Fix the churn dashboard refresh",
  "warnings": [],
  "status": "ingested",
- "note": "Sessions/2026-11-10-design-and-build-personal-wiki-capture-s-3a34ea9c.md",
- "topics": [{"slug": "wiki-capture", "created": true, "path": "wiki-capture.md", "tags": ["wiki-tooling"], "review_due": false}],
- "tags": ["wiki-tooling"],
+ "note": "Sessions/2026-11-10-fix-the-churn-dashboard-refresh.md",
+ "topics": [{"slug": "churn-dashboard", "created": true, "path": "churn-dashboard.md", "tags": ["dashboard"], "review_due": false}],
+ "tags": ["dashboard"],
  "queued_findings": 0
 }
 ```
 
 | Field | Meaning |
 |---|---|
-| `status` | `ingested` or `skipped`. A skip is a normal result, not an error: the session was too short, or the capture step judged it had nothing durable. `reason` says why, and the result then has only `session_id`, `title`, `warnings`, `status` and `reason`. |
-| `note` | The session note's path inside the personal wiki |
+| `name` | The session's readable name (as in `list`) |
+| `status` | `ingested` or `skipped`. A skip is a normal result, not an error: the session had no message from the user, or the capture step judged it had nothing durable. `reason` says why, and the result then has only `session_id`, `title`, `warnings`, `status` and `reason`. |
+| `note` | The session note's path inside the personal wiki: `Sessions/<date>-<title words>.md` for a new capture, with a piece of the session's id added only when another record already has that name. Records from earlier versions keep their names (with the id suffix) |
 | `topics` | One entry per topic the note was filed under, at most three |
 | `topics[].slug` | The topic's name |
 | `topics[].created` | True if this capture made the topic's page |
@@ -182,7 +207,7 @@ This is the slow call: one Haiku request, typically 20 to 40 seconds. Run it in 
 - **The AI never touches tasks.** Capture records no tasks and changes none: a to-do (a checkbox line, or "I need to send X by Friday") stays only where the person wrote it, and is not turned into a log line, a finding, an open question or anything else. As a guard, no checkbox line from the model is ever written into a record or onto a topic page. Task lines already in older records and pages are left as they are. Results no longer have `tasks` or `tasks_updated`.
 - What the model is shown of a session is masked: in commands, a number of six or more digits becomes `#`, quoted values inside anything that looks like a SQL query become `'?'`, and a command is cut at 160 characters. File paths for Read, Edit and Write are not masked. `condense` prints the result.
 
-Options: `--force` ingests a session shorter than the configured minimum, and is what an "Ingest anyway" button on a skipped session should pass. `--dry-run` returns `session_id`, `title`, `warnings`, `status: "dry-run"` and what would be captured, under `extraction`, without writing anything.
+Options: `--force` is accepted for older callers and changes nothing: a session named here is captured however short it is (the minimum-turns filter only hides sessions from `list`). `--dry-run` returns `session_id`, `title`, `warnings`, `status: "dry-run"` and what would be captured, under `extraction`, without writing anything.
 
 ### 3. Skip one
 
@@ -270,7 +295,7 @@ Returns the topics that are due. `--all` returns every topic, those due first, t
   "slug": "wiki-capture",
   "title": "Wiki capture",
   "folder": "wiki-tooling",
-  "tags": ["wiki-tooling"],
+  "tags": ["dashboard"],
   "kind": "tool",
   "summary": "Capturing Claude Code sessions into the personal wiki; in daily use.",
   "updated": "2026-11-10",
@@ -455,18 +480,18 @@ It fails, changing nothing, if a named topic has no page.
 
 ## Choosing the personal wiki
 
-Sessions can only ever be written to a wiki that has been marked as personal, and this is enforced by the tool, not the app:
+Sessions can only ever be written to the personal wiki, and this is enforced by the tool, not the app:
 
-- `config.json` names one folder as `personal_wiki`.
-- That folder must contain a `WIKI.md` whose frontmatter says `type: personal`. Every write command checks this first and refuses otherwise, so pointing the config at the team wiki by mistake fails with a clear error and writes nothing.
+- **In WikiApp** (a private `.wiki` folder exists), each open wiki has a role kept in `.wiki/wiki-settings.json` (`pathlist.wiki_roles`; TECHNICAL.md §7.1): `personal` (one at most), `team` (one at most) or `view`. Every write command (`init`, `ingest`, `ingest-file`, `capture-note`, `skip`, `review`, `folders-apply`, `merge-apply`, `resolve-conflict`, `reindex`) checks the folder it is given first: the wiki whose role is `personal` is allowed, with or without a `WIKI.md` (an existing one is left alone); a team or view-only wiki is refused in plain words ("Northwind is view only; choose your personal wiki in Settings."), and so is a folder outside the open wikis while another wiki is personal. Nothing is written and no model is asked.
+- **On the command line on its own** (no private folder, or a folder that isn't one of WikiApp's open wikis while none is personal), `config.json` (or `--personal`) names the folder, and it must contain a `WIKI.md` whose frontmatter says `type: personal`, as before.
 
-So "designate a personal wiki" in the app comes down to two steps: name the chosen folder (with `--personal`, or as `personal_wiki` in `config.json`), then run `python sb.py init --json`, which creates `WIKI.md`, the `Sessions` folder, the index and the promotion queue if they are missing. Topic pages are added at the top level as sessions are ingested. It returns `{"wiki": "...", "created": ["WIKI.md", "promotion-queue.md"]}`, listing what it made. `init` is safe to run on a wiki that already exists.
+So "designate a personal wiki" in the app is: give it the `personal` role, then run `python sb.py init --json` (Set up), which creates the `Sessions` folder, the promotion queue and the index if they are missing, and never `WIKI.md` (an existing one is left alone). Topic pages are added at the top level as sessions are ingested. It returns `{"wiki": "...", "created": ["Sessions/", "promotion-queue.md", "index.md"]}`: exactly what it made, in that order (`[]` when everything was there). WikiApp's `sessionsSetup` returns `status` plus that `created`. On the command line on its own, `init` also writes `WIKI.md` (from `templates/personal-WIKI.md`, listed first in `created`), because that is how `sb.py` alone knows the folder is personal; every write command there refuses a folder without it. `init` is safe to run on a wiki that already exists.
 
 For several users, give each their own config file and pass it with `--config <path>` or the `SECOND_BRAIN_CONFIG` environment variable.
 
 ## Rules and prompts
 
-**Per-wiki rules** go in `wiki_rules.md`, at the top level of the personal wiki. Its text (below any frontmatter) is sent with every capture and every topic review. A merge suggestion is not sent it. It is the same file WikiApp's other agents follow, and WikiApp edits it in its Agents and rules window. The body of `WIKI.md` is not used as rules; that file only marks the folder as personal.
+**The personal wiki's rules** are the user's own "My capture rules" file (`.wiki/capture-rules.md` in WikiApp's private folder, path-list entry `personal_capture_rules`; Settings, Rules). Its text (below any comments) is sent with every capture and every topic review. A merge suggestion is not sent it. The personal wiki has no `wiki_rules.md`, and the body of `WIKI.md` is not used as rules; that file only marks the folder as personal for the command line on its own. Team wikis keep a `wiki_rules.md` (below).
 
 **The prompts** are not in this folder. Capture uses the executive assistant's prompt and review uses the wiki reviewer's. Each has one prompt file, a slot in the app's path list (by default `<private .wiki folder>/prompts/<agent id>.md`, copied there from the shipped default in `../agents/<agent id>/SKILL.md`), read through `../agents/agentfiles.py`. `install` puts copies into `~/.claude/skills` only when you run it, for calling the agents by name in Claude Code. The tool sends the file's body, then a divider, then the sections it adds for the request (there is no shared task guide any more: the agents never write or change tasks). For a capture: the wiki's rules, the person's capture rules, the existing topics, the tag lists, the existing tags, the reply format, the source. The capture request does not name the folder a session ran in: a folder or file name is never evidence of what the work was about. For a review: the wiki's rules, the analyst's own notes on the topic, the session notes, the reply format. For a merge suggestion: the topics, the tags in use, the reply format. Set `WIKIAPP_SKILLS_DIR` to read the skills from another folder.
 
@@ -506,7 +531,7 @@ All inside the personal wiki folder:
 
 | Path | Written by | Safe to edit by hand |
 |---|---|---|
-| `Sessions/<date>-<title>-<id>.md` | `ingest`. `merge-apply` updates its `topics` or `tags` | Yes, but a re-ingest overwrites it, apart from a `## Tasks` section an earlier version wrote |
+| `Sessions/<date>-<title>.md` (`-<id piece>` only on a clash; older records keep `-<id>`) | `ingest`. `merge-apply` updates its `topics` or `tags` | Yes, but a re-ingest overwrites it, apart from a `## Tasks` section an earlier version wrote |
 | `<slug>.md`, or `<tag>/<slug>.md` once in a folder | `ingest` (the log, the frontmatter), `review` (the current state, the summary), `folders-apply` (moves it), `merge-apply` (adds to the kept page, removes the merged ones) | Only the Notes section. Everything under the `## Current state`, `## Related` and `## Log` headings is managed (Related is written again by each review): the log is written again from the session notes on every capture, so anything typed there is replaced. Keep those three headings as they are; a page missing one is left alone with an error naming it. Use `###` for headings of your own inside Notes |
 | `<tag>/<tag>.md` | `folders-apply` makes it; its list of topics is refreshed whenever the index is. `merge-apply --kind tag` renames it with its folder | Its Notes section. Everything under its `## Topics` heading is managed |
 | `index.md` | regenerated on every ingest, review, `folders-apply`, `merge-apply` and `reindex` | No |
@@ -518,7 +543,7 @@ In the progress folder (see the layout above), not the wiki:
 
 | File | Written by | Safe to edit by hand |
 |---|---|---|
-| `ledger.json` | `ingest`, `skip`, `capture-note` | No. It records which sessions and notes are done |
+| `ledger.json` | `ingest`, `skip`, `capture-note`; `list` adds a new session's readable `name` | No. It records which sessions and notes are done, and each session's name (an entry with only `name` is a session not captured yet) |
 | `conflicts.json` | `review`, `resolve-conflict` | No |
 | `spend.json` | every command that calls the model | Yes |
 | `lock` | present only during a write | Delete it if a crash leaves it behind; it expires on its own after 10 minutes |
